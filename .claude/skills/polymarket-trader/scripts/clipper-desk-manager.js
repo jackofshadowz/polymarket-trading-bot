@@ -143,15 +143,15 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder, wind
     const delta = windowPriceData ? windowPriceData.delta : 0;
     const deltaPct = windowPriceData ? Math.abs(windowPriceData.deltaPct) : 0;
 
-    // Need significant delta to bet (at least 0.3% move)
-    if (deltaPct < 0.3) {
+    // Need some delta to bet (at least 0.1% move = $83 on BTC ~$83k)
+    if (deltaPct < 0.1) {
       console.log(JSON.stringify({
         action: 'CLIPPER_DIRECTIONAL_SKIPPED',
         window: windowSlug,
         reason: 'Delta too small for directional bet',
         delta: delta.toFixed(2),
         deltaPct: deltaPct.toFixed(3) + '%',
-        minRequired: '0.3%',
+        minRequired: '0.1%',
         timestamp: new Date().toISOString()
       }));
       return false;
