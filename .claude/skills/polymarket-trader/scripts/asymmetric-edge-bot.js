@@ -872,9 +872,10 @@ async function tradingLoop() {
       const windowState = getWindowState(window.slug);
 
       // ============================================================
-      // CLIPPER DESK: STRADDLE EXECUTION (180-120s before close)
+      // CLIPPER DESK: DIRECTIONAL BET (420-360s before close = 7-6 min)
+      // Trading earlier for better liquidity
       // ============================================================
-      const inStraddleWindow = window.timeLeft <= 180 && window.timeLeft > 120;
+      const inStraddleWindow = window.timeLeft <= 420 && window.timeLeft > 360;
       if (inStraddleWindow && !windowState.clipperStraddlePlaced) {
         try {
           const market = await getCurrentMarket(window);
