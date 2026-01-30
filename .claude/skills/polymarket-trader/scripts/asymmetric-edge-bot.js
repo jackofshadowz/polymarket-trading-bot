@@ -8,6 +8,9 @@
 //   - At 10¢: 5 shares = $0.50
 // Profile: https://polymarket.com/@k9Q2mX4L8A7ZP3R
 
+// Load environment variables from .env file
+require('dotenv').config();
+
 const WebSocket = require('ws');
 const https = require('https');
 const { execSync } = require('child_process');

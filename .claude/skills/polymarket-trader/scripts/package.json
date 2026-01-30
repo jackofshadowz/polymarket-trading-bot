@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "dotenv": "^17.2.3",
     "ethers": "^6.16.0",
     "sqlite3": "^5.1.7",
     "ws": "^8.19.0"
