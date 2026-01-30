@@ -126,8 +126,8 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder, wind
   try {
     const clipperBalance = virtualAccounts.getDeskBalance('CLIPPER');
 
-    // Check if balance sufficient (min $5)
-    if (clipperBalance < 5.00) {
+    // Check if balance sufficient (min $3 to have any chance at 5 shares)
+    if (clipperBalance < 3.00) {
       console.log(JSON.stringify({
         action: 'CLIPPER_DIRECTIONAL_SKIPPED',
         window: windowSlug,
@@ -159,12 +159,31 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder, wind
 
     // Bet on the LIKELY WINNER (FIX #1: Buy winning side)
     const likelyWinner = delta > 0 ? 'YES' : 'NO';
-    const betSize = clipperBalance * 0.15; // 15% of balance on winner
 
     // FIX #2 & #4: Use AGGRESSIVE pricing with WIDE SLIPPAGE
     const targetPrice = likelyWinner === 'YES' ? market.yesPrice : market.noPrice;
     const tokenId = likelyWinner === 'YES' ? market.yesTokenId : market.noTokenId;
     const maxPrice = Math.min(0.95, targetPrice + 0.10); // 10 cents slippage!
+
+    // MINIMUM 5 SHARES required by Polymarket - calculate min bet
+    const minShares = 5;
+    const minBetSize = minShares * maxPrice; // e.g., 5 shares * $0.85 = $4.25
+    const desiredBetSize = clipperBalance * 0.15; // 15% of balance
+    const betSize = Math.max(minBetSize, desiredBetSize);
+
+    // Check if we have enough balance for minimum bet
+    if (clipperBalance < minBetSize) {
+      console.log(JSON.stringify({
+        action: 'CLIPPER_DIRECTIONAL_SKIPPED',
+        window: windowSlug,
+        reason: 'Insufficient balance for minimum 5 shares',
+        clipperBalance: clipperBalance.toFixed(2),
+        minRequired: minBetSize.toFixed(2),
+        maxPrice: maxPrice.toFixed(3),
+        timestamp: new Date().toISOString()
+      }));
+      return false;
+    }
 
     console.log(JSON.stringify({
       action: 'CLIPPER_DIRECTIONAL_BET',
