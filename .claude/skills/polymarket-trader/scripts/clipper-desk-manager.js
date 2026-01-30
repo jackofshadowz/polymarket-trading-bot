@@ -122,14 +122,14 @@ function assessMarketVibes(marketData) {
  * @param {Function} placeMarketOrder - Order placement function
  * @returns {Promise<boolean>} Success status
  */
-async function executeClipperStraddle(windowSlug, market, placeMarketOrder) {
+async function executeClipperStraddle(windowSlug, market, placeMarketOrder, windowPriceData) {
   try {
     const clipperBalance = virtualAccounts.getDeskBalance('CLIPPER');
 
     // Check if balance sufficient (min $5)
     if (clipperBalance < 5.00) {
       console.log(JSON.stringify({
-        action: 'CLIPPER_STRADDLE_SKIPPED',
+        action: 'CLIPPER_DIRECTIONAL_SKIPPED',
         window: windowSlug,
         reason: 'Insufficient balance',
         clipperBalance: clipperBalance.toFixed(2),
@@ -138,70 +138,94 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder) {
       return false;
     }
 
-    // Size: 10-15% of clipper balance
-    const straddleSize = clipperBalance * 0.12;
-    const yesCost = straddleSize / 2;
-    const noCost = straddleSize / 2;
+    // FIX #3: BET DIRECTIONALLY based on delta instead of straddle
+    // Determine likely winner based on price movement
+    const delta = windowPriceData ? windowPriceData.delta : 0;
+    const deltaPct = windowPriceData ? Math.abs(windowPriceData.deltaPct) : 0;
+
+    // Need significant delta to bet (at least 0.3% move)
+    if (deltaPct < 0.3) {
+      console.log(JSON.stringify({
+        action: 'CLIPPER_DIRECTIONAL_SKIPPED',
+        window: windowSlug,
+        reason: 'Delta too small for directional bet',
+        delta: delta.toFixed(2),
+        deltaPct: deltaPct.toFixed(3) + '%',
+        minRequired: '0.3%',
+        timestamp: new Date().toISOString()
+      }));
+      return false;
+    }
+
+    // Bet on the LIKELY WINNER (FIX #1: Buy winning side)
+    const likelyWinner = delta > 0 ? 'YES' : 'NO';
+    const betSize = clipperBalance * 0.15; // 15% of balance on winner
+
+    // FIX #2 & #4: Use AGGRESSIVE pricing with WIDE SLIPPAGE
+    const targetPrice = likelyWinner === 'YES' ? market.yesPrice : market.noPrice;
+    const tokenId = likelyWinner === 'YES' ? market.yesTokenId : market.noTokenId;
+    const maxPrice = Math.min(0.95, targetPrice + 0.10); // 10 cents slippage!
 
     console.log(JSON.stringify({
-      action: 'CLIPPER_STRADDLE_INITIATING',
+      action: 'CLIPPER_DIRECTIONAL_BET',
       window: windowSlug,
-      clipperBalance: clipperBalance.toFixed(2),
-      straddleSize: straddleSize.toFixed(2),
-      yesCost: yesCost.toFixed(2),
-      noCost: noCost.toFixed(2),
+      strategy: 'BET_LIKELY_WINNER',
+      delta: (delta >= 0 ? '+' : '') + delta.toFixed(2),
+      deltaPct: (delta >= 0 ? '+' : '') + deltaPct.toFixed(3) + '%',
+      likelyWinner: likelyWinner,
+      betSize: betSize.toFixed(2),
+      targetPrice: targetPrice.toFixed(3),
+      maxPrice: maxPrice.toFixed(3),
+      slippage: '10 cents (aggressive)',
       timestamp: new Date().toISOString()
     }));
 
-    // Buy YES
-    const yesOrder = await placeMarketOrder(market, {
-      side: 'YES',
-      tokenId: market.yesTokenId,
-      price: market.yesPrice,
-      betSize: yesCost,
+    // Place single directional bet on likely winner
+    const order = await placeMarketOrder(market, {
+      side: likelyWinner,
+      tokenId: tokenId,
+      price: maxPrice, // Use max price for aggressive fill
+      betSize: betSize,
       desk: 'CLIPPER'
-    }, yesCost);
+    }, betSize);
 
-    // Buy NO
-    const noOrder = await placeMarketOrder(market, {
-      side: 'NO',
-      tokenId: market.noTokenId,
-      price: market.noPrice,
-      betSize: noCost,
-      desk: 'CLIPPER'
-    }, noCost);
+    // Check if directional bet succeeded
+    if (order && order.success) {
+      // Record position using recordTrade (single directional bet)
+      const shares = order.totalShares || (betSize / maxPrice);
+      const avgPrice = order.avgFillPrice || maxPrice;
 
-    if (yesOrder && yesOrder.success && noOrder && noOrder.success) {
-      // Record straddle
-      virtualAccounts.recordStraddle('CLIPPER', windowSlug, {
-        yesShares: yesOrder.totalShares,
-        noShares: noOrder.totalShares,
-        yesCost: yesCost,
-        noCost: noCost,
-        totalCost: straddleSize,
-        timestamp: new Date().toISOString(),
-        settled: false
-      });
+      virtualAccounts.recordTrade(
+        'CLIPPER',
+        windowSlug,
+        likelyWinner,       // side: YES or NO
+        avgPrice,           // entryPrice
+        shares,             // shares
+        betSize,            // costBasis
+        tokenId,            // tokenId
+        false,              // lottoTicket
+        false               // isStraddleOrigin - NO, it's directional!
+      );
 
       console.log(JSON.stringify({
-        action: 'CLIPPER_STRADDLE_PLACED',
+        action: 'CLIPPER_DIRECTIONAL_SUCCESS',
         window: windowSlug,
-        yesShares: yesOrder.totalShares.toFixed(2),
-        yesPrice: yesOrder.avgFillPrice.toFixed(3),
-        noShares: noOrder.totalShares.toFixed(2),
-        noPrice: noOrder.avgFillPrice.toFixed(3),
-        totalCost: straddleSize.toFixed(2),
-        purpose: 'Create clippable position for next window',
+        side: likelyWinner,
+        shares: shares.toFixed(2),
+        avgPrice: avgPrice.toFixed(3),
+        cost: betSize.toFixed(2),
+        delta: (delta >= 0 ? '+' : '') + delta.toFixed(2),
+        purpose: 'Bet on likely winner based on delta momentum',
         timestamp: new Date().toISOString()
       }));
 
       return true;
     } else {
       console.log(JSON.stringify({
-        action: 'CLIPPER_STRADDLE_FAILED',
+        action: 'CLIPPER_DIRECTIONAL_FAILED',
         window: windowSlug,
-        yesSuccess: yesOrder ? yesOrder.success : false,
-        noSuccess: noOrder ? noOrder.success : false,
+        side: likelyWinner,
+        error: order ? order.error : 'Order returned null',
         timestamp: new Date().toISOString()
       }));
       return false;

@@ -876,19 +876,25 @@ async function tradingLoop() {
         try {
           const market = await getCurrentMarket(window);
           if (market && !market.closed) {
+            // Get window price data for delta-based directional betting
+            const windowPriceData = windowPriceTracker.getWindowPriceData(window.slug);
+
             console.log(JSON.stringify({
-              action: 'CLIPPER_STRADDLE_WINDOW',
+              action: 'CLIPPER_DIRECTIONAL_WINDOW',
               window: window.slug,
               timeLeft: window.timeLeft,
-              purpose: 'Buy both YES + NO to create clippable position for next window',
+              delta: windowPriceData ? windowPriceData.delta.toFixed(2) : 'N/A',
+              deltaPct: windowPriceData ? windowPriceData.deltaPct.toFixed(3) + '%' : 'N/A',
+              purpose: 'Bet on likely winner based on delta momentum',
               timestamp: new Date().toISOString()
             }));
 
-            // Execute straddle for CURRENT window (positions carry to next)
+            // Execute DIRECTIONAL BET (not straddle) based on delta
             await clipperDeskManager.executeClipperStraddle(
               window.slug,
               market,
-              placeMarketOrder
+              placeMarketOrder,
+              windowPriceData  // Pass delta data for directional decision
             );
 
             windowState.clipperStraddlePlaced = true;
