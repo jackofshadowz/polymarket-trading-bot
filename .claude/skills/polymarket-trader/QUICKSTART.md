@@ -1,259 +1,204 @@
 # Polymarket Trading Bot - Quick Start Guide
 
-## Installation Complete! ✅
+## Overview
 
-Your Polymarket trading skill has been installed for Clawdbot.
+This is a professional-grade autonomous trading bot for Polymarket's 15-minute Bitcoin prediction markets. The bot uses 5 independent profit strategies with automatic cash recycling.
 
-## File Structure
+## Architecture
 
 ```
-/Users/admin/Documents/Clawdbot/
-├── .polymarket-credentials.env          # Your API credentials
-└── .claude/skills/polymarket-trader/
-    ├── SKILL.md                         # Main skill definition
-    ├── README.md                        # Full documentation
-    ├── QUICKSTART.md                    # This file
-    └── scripts/
-        ├── trader.js                    # Main trading bot
-        ├── safe-trader.sh               # Safety wrapper
-        └── setup.sh                     # Setup script
+┌─────────────────────────────────────────────────────────────────┐
+│                    ASYMMETRIC EDGE BOT                          │
+├─────────────────────────────────────────────────────────────────┤
+│  ORACLE DESK          Real-time Binance price stream            │
+│  CLIPPER DESK         5 trading strategies                      │
+│  EXECUTION DESK       Order placement + auto-flip               │
+│  TREASURY DESK        Auto-redeem winnings every 5 min          │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## Quick Start (3 Steps)
+## The 5 Profit Strategies
 
-### Step 1: Load Your Credentials
+| Strategy | Timing | Entry | Exit | Edge |
+|----------|--------|-------|------|------|
+| **SNIPER** | 5-2 min before close | Fair value | Expiry | Binance latency arb |
+| **OPENER** | 60-10s before close | $0.51 | $0.60+ scalp | Trend continuation |
+| **DIP SCALPER** | Anytime | $0.47 | $0.75 (60%) | Buy panic, sell rebound |
+| **LOTTO** | 3min-30s before close | $0.02 | Expiry | 50x moonshot on volatility |
+| **EMERGENCY** | Always | N/A | Panic sell | Capital preservation |
+
+## Quick Start
+
+### Step 1: Navigate to Scripts
 
 ```bash
-source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env
+cd /Users/admin/Documents/Clawdbot/.claude/skills/polymarket-trader/scripts
 ```
 
-To make this permanent, add to your `~/.zshrc`:
+### Step 2: Install Dependencies
 
 ```bash
-echo 'source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env' >> ~/.zshrc
+npm install
 ```
 
-### Step 2: Test the Connection
+### Step 3: Configure Environment
+
+Create `.env` file with your API keys:
 
 ```bash
-# Load credentials first (from Step 1)
-source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env
-
-# Run the trader (dry-run mode by default)
-node .claude/skills/polymarket-trader/scripts/trader.js
+# Copy and edit
+echo "MOONSHOT_API_KEY=your-key-here" > .env
 ```
 
-You should see JSON output showing market analysis.
-
-### Step 3: Use in Clawdbot
-
-Once Clawdbot is running, invoke the skill:
-
-```
-/polymarket-trader analyze
-```
-
-## Your Wallet
-
-- **Balance**: $61
-- **Address**: `95e7b13f56fa54c7f8ee26892f08b1078c607ccbf5f98e440269665938d6eee9`
-- **Objective**: Grow to $152.50 (2.5x) over 24 hours
-
-## Safety Features 🛡️
-
-### The bot is in DRY-RUN mode by default
-
-- ✅ All analysis runs normally
-- ✅ Trade signals are generated
-- ❌ NO real orders are placed
-- ❌ NO money is risked
-
-### To Enable Live Trading
-
-**⚠️ WARNING: This involves real money! ⚠️**
-
-1. Open `trader.js`
-2. Find line ~283: `// await placeOrder(...)`
-3. Uncomment the line to enable live trading
-4. Save the file
-
-**OR** use the safe wrapper:
+### Step 4: Start the Bot
 
 ```bash
-.claude/skills/polymarket-trader/scripts/safe-trader.sh --live analyze
+# Start in background with logging
+nohup node asymmetric-edge-bot.js > bot.log 2>&1 &
+
+# Check status
+tail -f bot.log
 ```
 
-## Available Commands
-
-### Via Clawdbot Skill
-
-```
-/polymarket-trader analyze     # Analyze markets
-/polymarket-trader balance     # Check wallet balance
-/polymarket-trader positions   # View open positions
-/polymarket-trader monitor     # Continuous monitoring
-```
-
-### Direct Script Execution
+### Step 5: Monitor
 
 ```bash
-# Make sure credentials are loaded first!
-source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env
+# View recent activity
+tail -100 bot.log
 
-# Analyze markets
-node .claude/skills/polymarket-trader/scripts/trader.js
+# Check if running
+ps aux | grep asymmetric-edge-bot
 
-# Using safe wrapper (recommended)
-.claude/skills/polymarket-trader/scripts/safe-trader.sh analyze
-
-# Continuous monitoring (every 5 minutes)
-watch -n 300 '.claude/skills/polymarket-trader/scripts/safe-trader.sh analyze'
+# Stop the bot
+pkill -f asymmetric-edge-bot
 ```
 
-## Risk Management Parameters
+## Key Files
 
-Your current settings:
+| File | Purpose |
+|------|---------|
+| `asymmetric-edge-bot.js` | Main orchestrator |
+| `oracle-desk.js` | Real-time Binance WebSocket |
+| `binance-oracle.js` | REST API + market discovery |
+| `clipper-desk-manager.js` | All 5 trading strategies |
+| `execution-desk.js` | Order execution + auto-flip |
+| `treasury-desk.js` | Auto-redemption every 5 min |
+| `virtual-account-manager.js` | Position & P&L tracking |
 
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| **Max Position** | 20% | Max $12.20 per trade |
-| **Min Position** | $5 | Minimum trade size |
-| **Stop Loss** | -30% | Stop at $42.70 |
-| **Take Profit** | 2.5x | Exit at $152.50 |
-| **Confidence** | 65% | Min confidence to trade |
-| **Max Positions** | 3 | Concurrent trades |
+## Configuration
 
-## Trading Strategy
+Edit `asymmetric-edge-bot.js` to adjust:
 
-The bot analyzes:
+```javascript
+// Manual balance (update to match Polymarket GUI)
+const MANUAL_BALANCE = 36.36;
 
-1. **Order Book Dynamics** - Bid/ask spread, volume imbalance
-2. **Price Momentum** - 15-minute patterns and trends
-3. **Market Sentiment** - News and social sentiment
-4. **Historical Patterns** - Win rate of similar setups
+// Strategy parameters in clipper-desk-manager.js
+MAX_PRICE_CAP = 0.85;      // Never pay more than 85 cents
+MIN_EDGE_PCT = 3.0;        // Require 3% edge to trade
+LOTTO_MAX_PRICE = 0.025;   // Lotto tickets at 2.5 cents max
+DIP_BUY_PRICE = 0.47;      // Buy dips at 47 cents
+```
 
-Only trades when confidence ≥ 65% and conditions are favorable.
+## Risk Management
 
-## Understanding the Output
+| Parameter | Value | Purpose |
+|-----------|-------|---------|
+| Max Price Cap | $0.85 | Never risk $0.85 to make $0.15 |
+| Min Edge | 3% | Skip trades without clear advantage |
+| Emergency Threshold | ±0.40% | Halt trading on violent moves |
+| Lotto Budget | $1/ticket | Small bet, huge upside |
+| Treasury Interval | 5 min | Auto-redeem winnings |
 
-The bot outputs structured JSON:
+## Autonomous Features
+
+The bot runs fully autonomous:
+
+- **Trades automatically** when edge detected
+- **Skips bad trades** (no more $0.99 bids!)
+- **Auto-redeems** winnings to USDC every 5 min
+- **Emergency brake** on market crashes
+- **Multiple strategies** for different conditions
+
+## Monitoring Commands
+
+```bash
+# Live log tail
+tail -f bot.log
+
+# Recent trades only
+grep -E "SUCCESS|FILLED|REDEEM" bot.log | tail -20
+
+# Check errors
+grep -i error bot.log | tail -10
+
+# Treasury activity
+grep TREASURY bot.log | tail -10
+
+# Strategy activity
+grep -E "SNIPER|OPENER|LOTTO|DIP" bot.log | tail -20
+```
+
+## Understanding Log Output
 
 ```json
-{
-  "action": "MARKET_ANALYSIS",
-  "market": "Will Bitcoin price be above $89,500 in 15 minutes?",
-  "analysis": {
-    "momentum": "bullish",
-    "confidence": 0.72,
-    "recommendation": "BUY",
-    "reasoning": [
-      "Strong buy-side pressure detected",
-      "Upward price momentum confirmed"
-    ]
-  }
-}
+{"action":"CLIPPER_EDGE_ANALYSIS",
+ "fairValue":"0.650",
+ "marketPrice":"0.550",
+ "edge":"15.4%",
+ "recommendation":"BUY"}
 ```
 
 Key fields:
-- `confidence`: 0-1 scale (0.72 = 72% confident)
-- `recommendation`: BUY, SELL, or HOLD
-- `reasoning`: Why this decision was made
-
-## Monitoring Performance
-
-### View Logs
-
-All decisions are logged to stdout. Redirect to a file:
-
-```bash
-node trader.js > trading-log.json 2>&1
-```
-
-### Track Metrics
-
-- Balance changes
-- Win rate
-- Average profit per trade
-- Risk-adjusted returns
-
-## Next Steps
-
-Based on the previous Clawdbot experiment results you shared:
-
-> "The bot correctly identified that market conditions weren't optimal and avoided low-probability trades"
-
-This shows the risk management is working! The bot will:
-
-✅ Wait for high-confidence setups (≥65%)
-✅ Avoid trading in low-volatility conditions
-✅ Preserve capital during unclear markets
-✅ Execute when conditions improve
-
-### To Start Trading
-
-1. **Load credentials**: `source .polymarket-credentials.env`
-2. **Test dry-run**: `node trader.js`
-3. **Review output**: Check confidence scores and reasoning
-4. **Enable live trading**: Uncomment order placement in code
-5. **Monitor closely**: Watch first few trades carefully
-6. **Adjust parameters**: Tune based on performance
-
-### Integration with Your Existing Setup
-
-You mentioned having monitoring systems already running:
-- `delta-dune`: Price monitor tracking BTC
-- `lucky-sable`: Enhanced monitor generating signals
-
-This new skill can work alongside those or replace them with a unified system.
+- `fairValue`: What the token should be worth
+- `marketPrice`: What Polymarket is charging
+- `edge`: Your expected advantage
+- `recommendation`: BUY, SKIP, or NO_EDGE
 
 ## Troubleshooting
 
-### "Credentials not loaded"
+### Bot Not Trading
+- Check if edge exists: Look for `CLIPPER_NO_EDGE` in logs
+- Verify prices aren't too high (>$0.85 = skip)
+- Ensure balance is sufficient
 
-```bash
-source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env
+### Orders Not Filling
+- Check `EXECUTION_DESK_BUY_UNFILLED` logs
+- May need to adjust max price slightly
+
+### Balance Not Updating
+- Treasury runs every 5 min
+- Check `TREASURY_SCAN_COMPLETE` logs
+- Verify winning positions exist to redeem
+
+### Emergency Triggered
+- Look for `EMERGENCY_BRAKE_TRIGGERED`
+- Binance moved >0.4% rapidly
+- Bot will resume automatically
+
+## Safety Features
+
+1. **No $0.99 bids** - Uses fair value calculation
+2. **Price cap at $0.85** - Won't overpay
+3. **3% edge minimum** - Skips marginal trades
+4. **Emergency brake** - Halts on crashes
+5. **Auto-redemption** - Cash always available
+
+## Updating Balance
+
+When your Polymarket balance changes, update in code:
+
+```javascript
+// In asymmetric-edge-bot.js, line ~187
+const MANUAL_BALANCE = 36.36; // Update this number
 ```
 
-### "No markets found"
+Then restart the bot.
 
-15-minute BTC markets may not be active. Check Polymarket.com.
+## Architecture Deep Dive
 
-### "Insufficient balance"
-
-Ensure your wallet has at least $5 available.
-
-### API Errors
-
-Verify your credentials are correct and haven't expired.
-
-## Safety Checklist
-
-Before enabling live trading:
-
-- [ ] Credentials loaded and verified
-- [ ] Test run in dry-run mode successful
-- [ ] Understand all risk parameters
-- [ ] Comfortable with potential loss
-- [ ] Monitoring strategy in place
-- [ ] Ready to intervene if needed
-
-## Resources
-
-- **Full Documentation**: See `README.md` in this directory
-- **Polymarket API**: https://docs.polymarket.com/
-- **Clawdbot Skills**: https://code.claude.com/docs/en/skills.md
-
-## Support
-
-Questions? Issues?
-
-1. Check `README.md` for detailed docs
-2. Review JSON output for error messages
-3. Verify API credentials
-4. Test with smaller position sizes first
+See `DEPLOYMENT.md` for full technical documentation.
 
 ---
 
-**Remember**: This involves real money. Start conservatively, monitor closely, and never risk more than you can afford to lose. The 2.5x gain referenced from the ClawdBot experiment is not guaranteed and market conditions vary significantly.
-
-Good luck! 🦞📈
+**Remember**: This is real money. The bot is designed to be conservative (skip bad trades) rather than aggressive (take every opportunity). Monitor the first few hours closely.

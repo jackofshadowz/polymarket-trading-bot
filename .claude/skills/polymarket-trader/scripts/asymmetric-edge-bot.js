@@ -26,6 +26,8 @@ const leaderboard = require('./leaderboard-tracker');
 const tradingDeskOrchestrator = require('./trading-desk-orchestrator');
 const clipperDeskManager = require('./clipper-desk-manager');
 const executionDesk = require('./execution-desk');
+const binanceOracle = require('./binance-oracle');
+const treasuryDesk = require('./treasury-desk');
 
 // ============================================================
 // STRATEGY CONFIG
@@ -872,40 +874,60 @@ async function tradingLoop() {
       const windowState = getWindowState(window.slug);
 
       // ============================================================
-      // CLIPPER DESK: DIRECTIONAL BET (480-300s before close = 8-5 min)
-      // Trading earlier for better liquidity
+      // CLIPPER DESK: FAIR VALUE EDGE BETTING (300-120s = 5-2 min before close)
+      // Tighter window for more predictable outcomes + latency arbitrage
+      // Uses Binance oracle for "true" price vs Polymarket's lagged pricing
       // ============================================================
-      const inStraddleWindow = window.timeLeft <= 480 && window.timeLeft > 300;
-      if (inStraddleWindow && !windowState.clipperStraddlePlaced) {
+      const inClipperWindow = window.timeLeft <= 300 && window.timeLeft > 120;
+      if (inClipperWindow && !windowState.clipperStraddlePlaced) {
         try {
           const market = await getCurrentMarket(window);
           if (market && !market.closed) {
             // Get window price data for delta-based directional betting
             const windowPriceData = windowPriceTracker.getWindowPriceData(window.slug);
 
+            // LATENCY ARBITRAGE CHECK: Use Binance oracle for "true" delta
+            let latencyEdge = null;
+            if (windowPriceData && windowPriceData.openPrice) {
+              try {
+                latencyEdge = await binanceOracle.detectLatencyEdge(
+                  windowPriceData.openPrice,
+                  market.yesPrice,
+                  market.noPrice
+                );
+              } catch (oracleErr) {
+                console.warn('Binance oracle failed, using Polymarket data:', oracleErr.message);
+              }
+            }
+
             console.log(JSON.stringify({
-              action: 'CLIPPER_DIRECTIONAL_WINDOW',
+              action: 'CLIPPER_EDGE_WINDOW',
               window: window.slug,
               timeLeft: window.timeLeft,
-              delta: windowPriceData ? windowPriceData.delta.toFixed(2) : 'N/A',
-              deltaPct: windowPriceData ? windowPriceData.deltaPct.toFixed(3) + '%' : 'N/A',
-              purpose: 'Bet on likely winner based on delta momentum',
+              polyDelta: windowPriceData ? windowPriceData.delta.toFixed(2) : 'N/A',
+              polyDeltaPct: windowPriceData ? windowPriceData.deltaPct.toFixed(3) + '%' : 'N/A',
+              binanceDelta: latencyEdge ? latencyEdge.trueDelta.toFixed(2) : 'N/A',
+              binanceDeltaPct: latencyEdge ? latencyEdge.trueDeltaPct.toFixed(3) + '%' : 'N/A',
+              latencyOpportunity: latencyEdge && latencyEdge.opportunity ? latencyEdge.opportunity.action : 'NONE',
+              strategy: 'FAIR_VALUE_EDGE + LATENCY_ARBITRAGE',
               timestamp: new Date().toISOString()
             }));
 
-            // Execute DIRECTIONAL BET (not straddle) based on delta
+            // Execute edge-based bet with fair value calculation
+            // Pass timeLeft so clipper can calculate proper fair value
             await clipperDeskManager.executeClipperStraddle(
               window.slug,
               market,
               placeMarketOrder,
-              windowPriceData  // Pass delta data for directional decision
+              windowPriceData,
+              window.timeLeft  // Critical: time remaining affects fair value!
             );
 
             windowState.clipperStraddlePlaced = true;
           }
         } catch (error) {
           console.error(JSON.stringify({
-            action: 'CLIPPER_STRADDLE_ERROR',
+            action: 'CLIPPER_ERROR',
             window: window.slug,
             error: error.message,
             timestamp: new Date().toISOString()
@@ -913,17 +935,279 @@ async function tradingLoop() {
         }
       }
 
-      // Don't trade in last 2 minutes
+      // ============================================================
+      // OPENER STRATEGY: Pre-bid on NEXT window (60-10s before close)
+      // Based on current window's momentum (trend continuation)
+      // ============================================================
+      const inOpenerWindow = window.timeLeft <= 60 && window.timeLeft > 10;
+      if (inOpenerWindow && !windowState.openerBetPlaced) {
+        try {
+          const currentMarket = await getCurrentMarket(window);
+          const windowPriceData = windowPriceTracker.getWindowPriceData(window.slug);
+
+          if (currentMarket && windowPriceData) {
+            // Evaluate if we should place an opener bet
+            const openerDecision = clipperDeskManager.evaluateOpenerOpportunity(
+              window.timeLeft,
+              windowPriceData,
+              currentMarket
+            );
+
+            if (openerDecision) {
+              // Get the NEXT window's market
+              const nextWindowInfo = clipperDeskManager.getNextWindowInfo(window.start);
+
+              console.log(JSON.stringify({
+                action: 'OPENER_OPPORTUNITY_DETECTED',
+                currentWindow: window.slug,
+                nextWindow: nextWindowInfo.slug,
+                timeLeft: window.timeLeft + 's',
+                currentDelta: windowPriceData.delta.toFixed(2),
+                currentYesPrice: (currentMarket.yesPrice * 100).toFixed(0) + '¢',
+                openerSide: openerDecision.side,
+                openerPrice: openerDecision.price.toFixed(2),
+                confidence: openerDecision.confidence,
+                rationale: openerDecision.rationale,
+                timestamp: new Date().toISOString()
+              }));
+
+              // Fetch next window's market
+              const nextWindow = { slug: nextWindowInfo.slug, start: nextWindowInfo.start, end: nextWindowInfo.end };
+              const nextMarket = await getCurrentMarket(nextWindow);
+
+              if (nextMarket && !nextMarket.closed) {
+                // Execute opener bet on next window
+                const success = await clipperDeskManager.executeOpenerBet(
+                  nextWindowInfo.slug,
+                  nextMarket,
+                  openerDecision,
+                  placeMarketOrder
+                );
+
+                if (success) {
+                  windowState.openerBetPlaced = true;
+                  windowState.openerSide = openerDecision.side;
+                  windowState.openerNextWindow = nextWindowInfo.slug;
+                }
+              } else {
+                console.log(JSON.stringify({
+                  action: 'OPENER_NEXT_MARKET_NOT_READY',
+                  nextWindow: nextWindowInfo.slug,
+                  reason: nextMarket ? 'Market closed' : 'Market not found yet',
+                  timestamp: new Date().toISOString()
+                }));
+              }
+            }
+          }
+        } catch (error) {
+          console.error(JSON.stringify({
+            action: 'OPENER_ERROR',
+            window: window.slug,
+            error: error.message,
+            timestamp: new Date().toISOString()
+          }));
+        }
+      }
+
+      // Get current market (needed for lotto + other strategies)
+      const market = await getCurrentMarket(window);
+      if (!market || market.closed) {
+        await new Promise(resolve => setTimeout(resolve, CONFIG.priceCheckInterval));
+        continue;
+      }
+
+      // ============================================================
+      // EMERGENCY BRAKE - Check if Binance is crashing/pumping
+      // ============================================================
+      const windowPriceData = windowPriceTracker.getWindowPriceData(window.slug);
+      let oracleVolatility = 0;
+      let binanceData = null;
+
+      if (windowPriceData && windowPriceData.openPrice) {
+        try {
+          const quickCheck = await binanceOracle.quickDeltaCheck(windowPriceData.openPrice);
+          if (quickCheck.success) {
+            binanceData = { deltaPct: quickCheck.deltaPct, price: quickCheck.binancePrice };
+
+            // Calculate volatility from price history
+            if (MEMORY.priceHistory.length >= 10) {
+              const recentPrices = MEMORY.priceHistory.slice(-10).map(p => p.price);
+              const high = Math.max(...recentPrices);
+              const low = Math.min(...recentPrices);
+              oracleVolatility = ((high - low) / low) * 100;
+            }
+
+            // EMERGENCY BRAKE: If BTC moves >0.4% in seconds, halt trading
+            const isCrashing = binanceData.deltaPct < -0.40;
+            const isPumping = binanceData.deltaPct > 0.40;
+
+            if (isCrashing || isPumping) {
+              console.log(JSON.stringify({
+                action: 'EMERGENCY_BRAKE_TRIGGERED',
+                reason: isCrashing ? 'CRASH_DETECTED' : 'PUMP_DETECTED',
+                deltaPct: binanceData.deltaPct.toFixed(2) + '%',
+                response: 'CANCELLING_ALL_BIDS',
+                timestamp: new Date().toISOString()
+              }));
+
+              // Cancel all open orders
+              executionDesk.emergencyCancelAllBuys();
+
+              // If we have positions, consider panic sell
+              if (isCrashing) {
+                const clipperPositions = virtualAccounts.getOpenPositions('CLIPPER');
+                const yesPositions = clipperPositions.filter(p => p.side === 'YES');
+                if (yesPositions.length > 0) {
+                  console.log(JSON.stringify({
+                    action: 'EMERGENCY_PANIC_SELL',
+                    reason: 'Holding YES during crash',
+                    positions: yesPositions.length,
+                    timestamp: new Date().toISOString()
+                  }));
+                  // Panic sell YES positions
+                  executionDesk.emergencyPanicSell();
+                }
+              }
+
+              await new Promise(resolve => setTimeout(resolve, CONFIG.priceCheckInterval));
+              continue;
+            }
+          }
+        } catch (e) { /* ignore oracle errors */ }
+      }
+
+      // ============================================================
+      // LOTTO TICKET SCANNER - Buy cheap tickets on high volatility
+      // Runs in last 3 minutes (180-30 seconds)
+      // ============================================================
+      const inLottoWindow = window.timeLeft <= 180 && window.timeLeft > 30;
+      if (inLottoWindow) {
+        try {
+          const lottoOpportunity = clipperDeskManager.scanForLottoTickets(
+            market,
+            oracleVolatility,
+            window.slug,
+            window.timeLeft
+          );
+
+          if (lottoOpportunity && lottoOpportunity.available) {
+            if (lottoOpportunity.skipped) {
+              // Log why we skipped
+              console.log(JSON.stringify({
+                action: 'LOTTO_TICKET_SKIPPED',
+                window: window.slug,
+                side: lottoOpportunity.side,
+                price: (lottoOpportunity.price * 100).toFixed(1) + '¢',
+                reason: lottoOpportunity.reason,
+                volatility: oracleVolatility.toFixed(3) + '%',
+                timestamp: new Date().toISOString()
+              }));
+            } else {
+              // Execute lotto buy
+              console.log(JSON.stringify({
+                action: 'LOTTO_TICKET_OPPORTUNITY',
+                window: window.slug,
+                side: lottoOpportunity.side,
+                entryPrice: (lottoOpportunity.entryPrice * 100).toFixed(1) + '¢',
+                payoffRatio: lottoOpportunity.payoffRatio,
+                volatility: oracleVolatility.toFixed(3) + '%',
+                timeLeft: window.timeLeft + 's',
+                timestamp: new Date().toISOString()
+              }));
+
+              await clipperDeskManager.executeLottoBuy(
+                window.slug,
+                market,
+                lottoOpportunity,
+                placeMarketOrder
+              );
+            }
+          }
+        } catch (error) {
+          console.warn('Lotto scanner error:', error.message);
+        }
+      }
+
+      // Don't trade OTHER strategies in last 2 minutes (lotto + opener can run)
       if (window.timeLeft < 120) {
         await new Promise(resolve => setTimeout(resolve, CONFIG.priceCheckInterval));
         continue;
       }
 
-      // Get current market
-      const market = await getCurrentMarket(window);
-      if (!market || market.closed) {
-        await new Promise(resolve => setTimeout(resolve, CONFIG.priceCheckInterval));
-        continue;
+      // ============================================================
+      // DIP SCALPER (REBOUND STRATEGY) - Buy panic dips, auto-flip at 60%
+      // ============================================================
+      try {
+        // binanceData already fetched above in emergency brake section
+
+        // CHECK 1: Monitor existing dip positions for auto-flip
+        const autoFlip = clipperDeskManager.checkDipAutoFlip(
+          market,
+          window.slug,
+          window.timeLeft,
+          binanceData
+        );
+
+        if (autoFlip) {
+          console.log(JSON.stringify({
+            action: 'DIP_SCALPER_AUTO_FLIP',
+            window: window.slug,
+            flipAction: autoFlip.action,
+            side: autoFlip.position.side,
+            entryPrice: autoFlip.position.entryPrice.toFixed(3),
+            currentPrice: autoFlip.price.toFixed(3),
+            profit: '$' + (autoFlip.profit * autoFlip.position.shares).toFixed(2),
+            profitPct: autoFlip.profitPct.toFixed(0) + '%',
+            reason: autoFlip.reason,
+            timestamp: new Date().toISOString()
+          }));
+
+          // Execute the sell
+          await clipperDeskManager.executeClip(
+            'CLIPPER',
+            { ...autoFlip.position, windowSlug: window.slug },
+            autoFlip.action === 'PARTIAL_TAKE_30PCT' ? 0.50 : 1.0, // Partial or full
+            autoFlip.action,
+            market,
+            placeMarketOrder
+          );
+
+          // Mark position as closed (or partial)
+          if (autoFlip.action !== 'PARTIAL_TAKE_30PCT') {
+            clipperDeskManager.closeDipPosition(window.slug);
+          }
+        }
+
+        // CHECK 2: Look for new dip opportunities
+        const dipOpportunity = clipperDeskManager.evaluateDipOpportunity(
+          market,
+          binanceData,
+          window.slug,
+          window.timeLeft
+        );
+
+        if (dipOpportunity && dipOpportunity.action !== 'SKIP') {
+          console.log(JSON.stringify({
+            action: 'DIP_OPPORTUNITY_DETECTED',
+            window: window.slug,
+            side: dipOpportunity.side,
+            dipPrice: (market[dipOpportunity.side.toLowerCase() + 'Price'] * 100).toFixed(0) + '¢',
+            targetBuy: (dipOpportunity.price * 100).toFixed(0) + '¢',
+            targetSell: (dipOpportunity.targetSellPrice * 100).toFixed(0) + '¢',
+            binanceDelta: binanceData ? binanceData.deltaPct.toFixed(2) + '%' : 'N/A',
+            rationale: dipOpportunity.rationale,
+            timestamp: new Date().toISOString()
+          }));
+
+          await clipperDeskManager.executeDipBuy(
+            window.slug,
+            market,
+            dipOpportunity,
+            placeMarketOrder
+          );
+        }
+      } catch (error) {
+        console.warn('Dip scalper error:', error.message);
       }
 
       // ============================================================
@@ -1071,7 +1355,7 @@ async function tradingLoop() {
       }
 
       // 7-PLAYER TRADING DESK ORCHESTRATION (Farm + Degen + Clipper)
-      const windowPriceData = windowPriceTracker.getWindowPriceData(window.slug);
+      // windowPriceData already fetched above
       const consultationWindow = CONFIG.kimiConsultationWindow;
 
       // AI ORCHESTRATION DISABLED - using simple price-based rules instead
@@ -1735,6 +2019,19 @@ async function start() {
   // Connect to price feed
   connectBinanceWebSocket();
   await new Promise(resolve => setTimeout(resolve, 2000));
+
+  // ============================================================
+  // START TREASURY DESK (Auto-redemption of winnings)
+  // Runs every 5 minutes in background to convert winning shares to USDC
+  // ============================================================
+  treasuryDesk.startHeartbeat();
+
+  console.log(JSON.stringify({
+    action: 'TREASURY_DESK_STARTED',
+    interval: '5 minutes',
+    purpose: 'Auto-redeem winning positions to USDC',
+    timestamp: new Date().toISOString()
+  }));
 
   // Start trading
   await tradingLoop();

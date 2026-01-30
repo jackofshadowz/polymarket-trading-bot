@@ -585,6 +585,257 @@ function executeApprovedTrade(trade, market) {
   }
 }
 
+// ============================================================
+// ORDER LIFECYCLE MANAGEMENT - Track and auto-flip orders
+// ============================================================
+
+// Active orders we're watching
+const activeFlipOrders = new Map(); // orderId -> { tokenId, entryPrice, shares, targetPrice, status }
+
+/**
+ * Place a dip buy order and set up auto-flip monitoring
+ * When the buy fills, automatically post a sell at target price
+ *
+ * @param {string} tokenId - Token to buy
+ * @param {number} buyPrice - Price to bid at (e.g., 0.47)
+ * @param {number} targetSellPrice - Price to sell at (e.g., 0.75)
+ * @param {number} amountUSDC - Amount to spend
+ */
+function placeDipBuyWithAutoFlip(tokenId, buyPrice, targetSellPrice, amountUSDC) {
+  console.log(JSON.stringify({
+    action: 'EXECUTION_DESK_DIP_BUY_INIT',
+    tokenId: tokenId.substring(0, 20) + '...',
+    buyPrice: buyPrice.toFixed(3),
+    targetSellPrice: targetSellPrice.toFixed(3),
+    amountUSDC: amountUSDC.toFixed(2),
+    expectedProfit: ((targetSellPrice - buyPrice) * (amountUSDC / buyPrice)).toFixed(2),
+    timestamp: new Date().toISOString()
+  }));
+
+  // Place the buy order
+  const buyResult = placeBuyOrder(tokenId, amountUSDC, buyPrice);
+
+  if (buyResult.success) {
+    // Calculate shares received
+    const shares = buyResult.sharesReceived || (amountUSDC / buyResult.avgFillPrice);
+
+    // Track this order for auto-flip
+    activeFlipOrders.set(buyResult.orderID, {
+      tokenId: tokenId,
+      entryPrice: buyResult.avgFillPrice,
+      shares: shares,
+      targetPrice: targetSellPrice,
+      status: 'HOLDING',
+      buyOrderID: buyResult.orderID,
+      sellOrderID: null,
+      createdAt: Date.now()
+    });
+
+    console.log(JSON.stringify({
+      action: 'EXECUTION_DESK_DIP_BUY_FILLED',
+      orderID: buyResult.orderID,
+      entryPrice: buyResult.avgFillPrice.toFixed(3),
+      shares: shares.toFixed(2),
+      targetSellPrice: targetSellPrice.toFixed(3),
+      potentialProfit: ((targetSellPrice - buyResult.avgFillPrice) * shares).toFixed(2),
+      nextStep: 'MONITORING_FOR_AUTO_FLIP',
+      timestamp: new Date().toISOString()
+    }));
+
+    return {
+      success: true,
+      orderID: buyResult.orderID,
+      entryPrice: buyResult.avgFillPrice,
+      shares: shares,
+      targetSellPrice: targetSellPrice,
+      status: 'HOLDING'
+    };
+  }
+
+  return {
+    success: false,
+    error: buyResult.error
+  };
+}
+
+/**
+ * Execute the auto-flip: sell shares at target price
+ * Called when price reaches target or on forced exit
+ *
+ * @param {string} orderId - Original buy order ID
+ * @param {number} sellPrice - Price to sell at (optional, defaults to target)
+ * @param {string} reason - Why we're flipping (TARGET_HIT, TIME_STOP, STOP_LOSS)
+ */
+function executeAutoFlip(orderId, sellPrice = null, reason = 'TARGET_HIT') {
+  const order = activeFlipOrders.get(orderId);
+
+  if (!order) {
+    return { success: false, error: 'Order not found in flip tracking' };
+  }
+
+  if (order.status !== 'HOLDING') {
+    return { success: false, error: 'Order already flipped or closed' };
+  }
+
+  const actualSellPrice = sellPrice || order.targetPrice;
+  const profit = (actualSellPrice - order.entryPrice) * order.shares;
+  const profitPct = ((actualSellPrice - order.entryPrice) / order.entryPrice) * 100;
+
+  console.log(JSON.stringify({
+    action: 'EXECUTION_DESK_AUTO_FLIP',
+    reason: reason,
+    buyOrderID: orderId,
+    entryPrice: order.entryPrice.toFixed(3),
+    sellPrice: actualSellPrice.toFixed(3),
+    shares: order.shares.toFixed(2),
+    profit: profit.toFixed(2),
+    profitPct: profitPct.toFixed(1) + '%',
+    timestamp: new Date().toISOString()
+  }));
+
+  // Place the sell order
+  const sellResult = placeSellOrder(order.tokenId, order.shares, actualSellPrice);
+
+  if (sellResult.success) {
+    // Update tracking
+    order.status = 'FLIPPED';
+    order.sellOrderID = sellResult.orderID;
+    order.sellPrice = sellResult.avgFillPrice;
+    order.realizedProfit = (sellResult.avgFillPrice - order.entryPrice) * order.shares;
+    order.flippedAt = Date.now();
+
+    console.log(JSON.stringify({
+      action: 'EXECUTION_DESK_FLIP_SUCCESS',
+      buyOrderID: orderId,
+      sellOrderID: sellResult.orderID,
+      entryPrice: order.entryPrice.toFixed(3),
+      exitPrice: sellResult.avgFillPrice.toFixed(3),
+      shares: order.shares.toFixed(2),
+      realizedProfit: order.realizedProfit.toFixed(2),
+      profitPct: ((sellResult.avgFillPrice - order.entryPrice) / order.entryPrice * 100).toFixed(1) + '%',
+      holdTimeMs: order.flippedAt - order.createdAt,
+      timestamp: new Date().toISOString()
+    }));
+
+    return {
+      success: true,
+      sellOrderID: sellResult.orderID,
+      exitPrice: sellResult.avgFillPrice,
+      profit: order.realizedProfit,
+      profitPct: (sellResult.avgFillPrice - order.entryPrice) / order.entryPrice * 100
+    };
+  }
+
+  return {
+    success: false,
+    error: sellResult.error
+  };
+}
+
+/**
+ * Check all active flip orders and trigger sells at target
+ * Call this periodically from main loop
+ *
+ * @param {Object} currentPrices - { yesPrice, noPrice }
+ */
+function checkAutoFlips(currentPrices) {
+  const triggered = [];
+
+  for (const [orderId, order] of activeFlipOrders.entries()) {
+    if (order.status !== 'HOLDING') continue;
+
+    // Determine current price (assume YES tokens for now)
+    const currentPrice = currentPrices.yesPrice; // TODO: track which side
+
+    // Check if target hit
+    if (currentPrice >= order.targetPrice) {
+      console.log(JSON.stringify({
+        action: 'EXECUTION_DESK_TARGET_HIT',
+        orderID: orderId,
+        targetPrice: order.targetPrice.toFixed(3),
+        currentPrice: currentPrice.toFixed(3),
+        triggering: 'AUTO_FLIP',
+        timestamp: new Date().toISOString()
+      }));
+
+      const flipResult = executeAutoFlip(orderId, currentPrice, 'TARGET_HIT');
+      triggered.push({ orderId, result: flipResult });
+    }
+  }
+
+  return triggered;
+}
+
+/**
+ * Get all active flip orders (for monitoring)
+ */
+function getActiveFlipOrders() {
+  const orders = [];
+  for (const [orderId, order] of activeFlipOrders.entries()) {
+    orders.push({ orderId, ...order });
+  }
+  return orders;
+}
+
+/**
+ * Check if there's an active dip buy for a token
+ */
+function hasActiveDipBuy(tokenId = null) {
+  for (const [orderId, order] of activeFlipOrders.entries()) {
+    if (order.status === 'HOLDING') {
+      if (!tokenId || order.tokenId === tokenId) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Emergency: Cancel all buy orders (for market crash)
+ */
+function emergencyCancelAllBuys() {
+  console.log(JSON.stringify({
+    action: 'EXECUTION_DESK_EMERGENCY_CANCEL',
+    reason: 'Market crash detected - cancelling all bids',
+    timestamp: new Date().toISOString()
+  }));
+
+  const result = cancelAllOrders();
+
+  // Mark all holding orders as cancelled
+  for (const [orderId, order] of activeFlipOrders.entries()) {
+    if (order.status === 'HOLDING') {
+      order.status = 'EMERGENCY_CANCELLED';
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Emergency: Dump all bags at market price (panic sell)
+ */
+function emergencyPanicSell() {
+  console.log(JSON.stringify({
+    action: 'EXECUTION_DESK_PANIC_SELL',
+    reason: 'Emergency dump - selling all positions at market',
+    timestamp: new Date().toISOString()
+  }));
+
+  const results = [];
+
+  for (const [orderId, order] of activeFlipOrders.entries()) {
+    if (order.status === 'HOLDING') {
+      // Sell at 0.01 to ensure fill (market dump)
+      const result = executeAutoFlip(orderId, 0.01, 'PANIC_SELL');
+      results.push({ orderId, result });
+    }
+  }
+
+  return results;
+}
+
 // Export all functions
 module.exports = {
   parseCLIOutput,
@@ -594,7 +845,15 @@ module.exports = {
   placeSellOrder,
   cancelAllOrders,
   refreshAPIKeys,
-  executeApprovedTrade
+  executeApprovedTrade,
+  // Auto-flip order management
+  placeDipBuyWithAutoFlip,
+  executeAutoFlip,
+  checkAutoFlips,
+  getActiveFlipOrders,
+  hasActiveDipBuy,
+  emergencyCancelAllBuys,
+  emergencyPanicSell
 };
 
 // Self-test if run directly

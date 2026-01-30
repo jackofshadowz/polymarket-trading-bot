@@ -1,474 +1,405 @@
-# Autonomous Trading System - Deployment Guide
+# Polymarket Trading Bot - Technical Documentation
 
-## 🚀 System Overview
+## System Architecture
 
-This is a fully autonomous trading system for Polymarket that:
+### Component Overview
 
-✅ **Scans ALL markets** for profitable opportunities (not just BTC)
-✅ **Detects arbitrage** between orderbook, external data, and market pricing
-✅ **Uses external information** (live BTC prices, news, etc.) to find edges
-✅ **Trades short-term markets** (closing within 7 days for quick turnaround)
-✅ **Runs continuously** with automatic crash recovery
-✅ **Manages risk** with position limits, stop losses, and circuit breakers
-✅ **Places REAL trades** with your authorized $61 balance
-
-## 📊 Trading Strategies
-
-### 1. **Information Arbitrage**
-- Monitors real-time BTC prices from Coinbase/Binance
-- Compares with Polymarket BTC price prediction markets
-- Detects mispricing >15% and trades the edge
-- Example: BTC at $89,500, market asks "Above $90k?" priced at 20% → BUY (expected 50%)
-
-### 2. **Orderbook Imbalance**
-- Analyzes bid/ask volume ratios
-- Detects strong directional pressure (>75% one-sided)
-- Trades with the flow when imbalance indicates mispricing
-
-### 3. **Time Arbitrage**
-- Markets closing within 30 minutes
-- Outcome already determined but price not adjusted
-- Fast execution before market closes
-
-### 4. **Momentum Trading**
-- 24h price changes >10%
-- Volume spikes >3x average
-- Continuation patterns
-
-### 5. **Statistical Arbitrage**
-- Crossed orderbooks (instant profit)
-- Tight spreads with extreme pricing
-- Expected value vs market price divergence
-
-## 🎯 Risk Management
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| Starting Balance | $61 | Your authorized capital |
-| Max Position Size | 20% ($12) | Per trade limit |
-| Min Position Size | $5 | Minimum trade |
-| Max Positions | 3 | Concurrent trades |
-| Confidence Threshold | 65% | Minimum to trade |
-| Stop Loss | -30% ($42.70) | Circuit breaker |
-| Take Profit | 2.5x ($152.50) | Auto-exit target |
-| Max Time to Close | 7 days | Short-term only |
-
-## 🛠️ Installation & Deployment
-
-### Quick Start (3 Commands)
-
-```bash
-# 1. Load credentials
-source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env
-
-# 2. Test single scan
-node /Users/admin/Documents/Clawdbot/.claude/skills/polymarket-trader/scripts/enhanced-trader.js
-
-# 3. Start continuous monitoring
-/Users/admin/Documents/Clawdbot/.claude/skills/polymarket-trader/scripts/daemon.sh
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     ASYMMETRIC EDGE BOT v2.0                        │
+│                   "Set and Forget" Trading System                   │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐               │
+│  │   ORACLE    │   │   CLIPPER   │   │  EXECUTION  │               │
+│  │    DESK     │──▶│    DESK     │──▶│    DESK     │               │
+│  │             │   │             │   │             │               │
+│  │ Binance WS  │   │ 5 Strategies│   │ pmarket-cli │               │
+│  │ Price Feed  │   │ Fair Value  │   │ Order Mgmt  │               │
+│  └─────────────┘   └─────────────┘   └─────────────┘               │
+│         │                                   │                       │
+│         ▼                                   ▼                       │
+│  ┌─────────────┐                    ┌─────────────┐                │
+│  │  BINANCE    │                    │  TREASURY   │                │
+│  │   ORACLE    │                    │    DESK     │                │
+│  │             │                    │             │                │
+│  │ REST API    │                    │ Auto-Redeem │                │
+│  │ Latency Arb │                    │ Every 5 min │                │
+│  └─────────────┘                    └─────────────┘                │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Detailed Setup
+## File Structure
 
-#### 1. Verify Credentials
-
-```bash
-echo $POLYMARKET_API_KEY  # Should output your API key
+```
+scripts/
+├── asymmetric-edge-bot.js      # Main entry point & orchestrator
+├── oracle-desk.js              # Real-time Binance WebSocket stream
+├── binance-oracle.js           # REST API fallback + market discovery
+├── clipper-desk-manager.js     # All 5 trading strategies
+├── execution-desk.js           # Order execution + auto-flip
+├── treasury-desk.js            # Auto-redemption system
+├── virtual-account-manager.js  # Position & P&L tracking
+├── window-price-tracker.js     # Window open/close price tracking
+├── window-history-tracker.js   # Historical pattern analysis
+├── market-data-aggregator.js   # Data aggregation utilities
+├── dialogue-recorder.js        # Trade decision logging
+├── leaderboard-tracker.js      # Performance tracking
+└── .env                        # API keys (not committed)
 ```
 
-If empty:
-```bash
-source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env
-```
+## The 5 Trading Strategies
 
-#### 2. Test External Data Sources
+### 1. SNIPER (Fair Value Edge)
 
-```bash
-node /Users/admin/Documents/Clawdbot/.claude/skills/polymarket-trader/scripts/info-edge.js
-```
+**Purpose**: Only trade when mathematical edge exists
 
-Should output current BTC price from multiple sources.
-
-#### 3. Run Single Trading Scan
-
-```bash
-cd /Users/admin/Documents/Clawdbot
-source .polymarket-credentials.env
-node .claude/skills/polymarket-trader/scripts/enhanced-trader.js
-```
-
-This will:
-- Check balance
-- Scan up to 200 markets
-- Filter for short-term, liquid markets
-- Analyze each for opportunities
-- Place trades if confidence ≥65%
-
-#### 4. Start Continuous Daemon
-
-```bash
-.claude/skills/polymarket-trader/scripts/daemon.sh
-```
-
-This runs FOREVER until:
-- Circuit breaker hits (-30% loss)
-- Take profit reached (2.5x gain)
-- Manual stop (Ctrl+C)
-- Too many crashes (10 in 1 hour)
-
-## 📝 Monitoring & Logs
-
-### Real-Time Monitoring
-
-**View live logs:**
-```bash
-tail -f ~/.polymarket-trader/logs/latest.log
-```
-
-**Check if running:**
-```bash
-cat ~/.polymarket-trader/daemon.pid
-ps aux | grep enhanced-trader
-```
-
-**View all logs:**
-```bash
-ls -lh ~/.polymarket-trader/logs/
-```
-
-### Log Format
-
-Every action is logged as JSON:
-
-```json
-{
-  "action": "TRADE_OPPORTUNITY",
-  "market": "Will Bitcoin close above $90,000 today?",
-  "type": "PRICE_ARBITRAGE",
-  "recommendation": "BUY",
-  "confidence": 0.78,
-  "price": 0.45,
-  "size": 10,
-  "reasoning": [
-    "BTC currently at $91,200",
-    "Market threshold: $90,000",
-    "Market pricing: 45%",
-    "Expected probability: 85%",
-    "Mispricing: 40%"
-  ],
-  "timestamp": "2026-01-28T00:15:32.123Z"
-}
-```
-
-### Key Log Actions
-
-- `MONITORING_START` - Daemon started
-- `SCAN_START` - Beginning market scan
-- `BALANCE_CHECK` - Current balance & P/L
-- `MARKETS_SCANNED` - How many markets found
-- `OPPORTUNITIES_FOUND` - High-confidence trades identified
-- `TRADE_OPPORTUNITY` - Details of potential trade
-- `ORDER_PLACED` - Real order executed
-- `ORDER_FAILED` - Trade attempt failed
-- `CIRCUIT_BREAKER` - Stop loss triggered
-- `TAKE_PROFIT` - Profit target reached
-
-## 🔍 Understanding Output
-
-### Example Scan Cycle
-
-```json
-{"action":"SCAN_START","timestamp":"2026-01-28T00:15:00.000Z"}
-{"action":"BALANCE_CHECK","balance":61,"profit":0,"loss":0,"netPL":0}
-{"action":"MARKETS_SCANNED","count":47}
-{"action":"OPPORTUNITIES_FOUND","count":2}
-
-{"action":"TRADE_OPPORTUNITY",
- "market":"Will BTC hit $100k by Friday?",
- "type":"PRICE_ARBITRAGE",
- "confidence":0.82,
- "recommendation":"BUY",
- "price":0.35,
- "size":12,
- "reasoning":["BTC at $98,500", "Only $1500 away", "Closes in 36 hours"]}
-
-{"action":"ORDER_PLACED",
- "trade":{"market":"...","side":"BUY","price":0.35,"size":12}}
-```
-
-### What The Bot Looks For
-
-**High Confidence Signals (≥65%):**
-
-1. **BTC $1000 from threshold, closing in 24h** → 80% confidence
-2. **Orderbook 85% buy-side** → 75% confidence
-3. **Volume spike 5x + momentum** → 70% confidence
-4. **Crossed orderbook** → 95% confidence
-5. **Market closes in 15 min, outcome clear** → 90% confidence
-
-**Ignored Signals (<65%):**
-
-- Neutral orderbooks
-- Low volume markets
-- Uncertain outcomes
-- Long time to close (>7 days)
-- Insufficient edge
-
-## 📈 Performance Tracking
-
-### Check Current Status
-
-```bash
-# View latest balance
-tail -1 ~/.polymarket-trader/logs/latest.log | grep BALANCE_CHECK
-
-# Count trades placed
-grep ORDER_PLACED ~/.polymarket-trader/logs/latest.log | wc -l
-
-# View all opportunities found
-grep TRADE_OPPORTUNITY ~/.polymarket-trader/logs/latest.log
-```
-
-### Expected Performance
-
-Based on the ClawdBot $100→$347 experiment:
-
-- **Time horizon**: 8-24 hours
-- **Return**: 2-3x
-- **Win rate**: 60-70%
-- **Avg trade**: 5-15 minutes to close
-
-Your setup:
-- **Capital**: $61
-- **Target**: $152.50 (2.5x)
-- **Strategy**: More aggressive (any profitable market)
-- **Edge**: External data integration
-
-## 🛑 Stopping the Bot
-
-### Graceful Stop
-
-```bash
-# Find PID
-cat ~/.polymarket-trader/daemon.pid
-
-# Send interrupt signal
-kill -INT $(cat ~/.polymarket-trader/daemon.pid)
-```
-
-Or just press `Ctrl+C` if running in foreground.
-
-### Force Stop
-
-```bash
-pkill -9 -f enhanced-trader
-rm ~/.polymarket-trader/daemon.pid
-```
-
-## 🔧 Troubleshooting
-
-### No Opportunities Found
-
-**Cause**: Markets don't meet criteria (liquidity, time to close, confidence)
-
-**Solutions**:
-1. Lower confidence threshold: Edit `enhanced-trader.js`, change `confidenceThreshold: 0.55`
-2. Increase time window: Change `maxDaysOut = 14` for longer-term markets
-3. Lower volume requirement: Change minimum volume from 1000 to 500
-
-### Authentication Errors
-
-```bash
-# Re-source credentials
-source /Users/admin/Documents/Clawdbot/.polymarket-credentials.env
-
-# Verify loaded
-echo $POLYMARKET_API_KEY
-```
-
-### Bot Keeps Crashing
-
-Check logs:
-```bash
-grep ERROR ~/.polymarket-trader/logs/latest.log
-```
-
-Common issues:
-- API rate limiting (will auto-retry)
-- Network timeouts (will auto-restart)
-- Insufficient balance (check on Polymarket.com)
-
-### Orders Not Filling
-
-Markets may have:
-- Insufficient liquidity
-- Price moved away
-- Order rejected by exchange
-
-Check Polymarket.com → Orders tab for status.
-
-## 🎛️ Configuration
-
-### Adjust Risk Parameters
-
-Edit `/Users/admin/Documents/Clawdbot/.polymarket-credentials.env`:
-
-```bash
-export MAX_POSITION_SIZE=0.15        # More conservative (15%)
-export CONFIDENCE_THRESHOLD=0.70     # Higher bar (70%)
-export MAX_CONCURRENT_POSITIONS=2    # Fewer positions
-```
-
-### Change Scan Frequency
-
-Edit `enhanced-trader.js`:
-
+**Logic**:
 ```javascript
-scanInterval: 60000,  // Scan every 1 minute (more aggressive)
-// OR
-scanInterval: 300000, // Scan every 5 minutes (more conservative)
+fairValue = 0.50 + tanh(deltaPct × 3) × 0.40 × timeFactor
+edge = fairValue - marketPrice
+if (edge >= 0.03) TRADE else SKIP
 ```
 
-## 📊 Example Profitable Scenarios
+**Parameters**:
+- `MAX_PRICE_CAP`: 0.85 (never pay more)
+- `MIN_EDGE_PCT`: 3% (minimum advantage)
+- `MAX_SLIPPAGE`: 0.02 (2 cents above fair value)
 
-### Scenario 1: BTC Price Arbitrage
-
-**Market**: "Will Bitcoin close above $89,000 today?"
-**Current BTC Price**: $91,500
-**Market Price**: 55% YES
-**Time to Close**: 4 hours
-
-**Analysis**:
-- BTC is $2,500 above threshold
-- Very unlikely to drop $2,500 in 4 hours
-- Expected probability: 85%
-- Market mispricing: 30%
-- **Action**: BUY YES at 55% → Confidence 82%
-
-**Expected Return**: 1.8x (55¢ → $1.00)
-
-### Scenario 2: Time Arbitrage
-
-**Market**: "Will team X win this game?"
-**Game Status**: Team X won (final score confirmed)
-**Market Price**: 82% YES
-**Time to Close**: 12 minutes
-
-**Analysis**:
-- Outcome is certain (game over)
-- Market not fully adjusted
-- Should be 99%+
-- **Action**: BUY YES at 82% → Confidence 95%
-
-**Expected Return**: 1.22x (82¢ → $1.00)
-
-### Scenario 3: Orderbook Imbalance
-
-**Market**: "Will inflation report be above 3%?"
-**Bids**: $15,000
-**Asks**: $2,000
-**Ratio**: 88% buy-side
-
-**Analysis**:
-- Extreme buy pressure
-- Insiders likely know outcome
-- Follow the smart money
-- **Action**: BUY YES → Confidence 72%
-
-## 🚨 Safety Features
-
-The bot will **automatically stop** if:
-
-1. ❌ Balance drops below $42.70 (-30%)
-2. ✅ Balance reaches $152.50 (+150%)
-3. ⚠️ More than 10 crashes in 1 hour
-4. 🛑 Manual interrupt (Ctrl+C)
-
-All trades are logged with full reasoning for audit.
-
-## 📞 Support & Monitoring
-
-### Health Check
-
-```bash
-# Is it running?
-ps aux | grep enhanced-trader
-
-# Recent activity?
-ls -lt ~/.polymarket-trader/logs/ | head -5
-
-# Any errors?
-grep -i error ~/.polymarket-trader/logs/latest.log | tail -10
-```
-
-### View P&L
-
-```bash
-# Latest balance check
-grep BALANCE_CHECK ~/.polymarket-trader/logs/latest.log | tail -1 | jq
-```
-
-## 🎯 Optimization Tips
-
-### For More Trades:
-- Lower `confidenceThreshold` to 0.60
-- Increase `maxDaysOut` to 14 days
-- Decrease `minPositionSize` to $3
-
-### For Higher Win Rate:
-- Raise `confidenceThreshold` to 0.75
-- Decrease `maxDaysOut` to 3 days
-- Only trade `PRICE_ARBITRAGE` and `TIME_ARBITRAGE`
-
-### For Faster Turnaround:
-- Only trade markets closing < 24 hours
-- Focus on event-based markets (sports, announcements)
-- Use higher scan frequency (1 minute)
-
-## 🔬 Scientific Experiment Notes
-
-**Duration**: Running for ~3-7 days
-**Purpose**: Test autonomous trading strategies
-**Capital**: $61 (authorized for scientific purposes)
-**Hypothesis**: Information arbitrage + orderbook analysis can generate 2-3x returns
-
-**Data Collection**:
-- All trades logged with reasoning
-- External market conditions recorded
-- Performance metrics tracked
-- Edge types categorized
-
-**Expected Outcomes**:
-1. Identify which strategies work best
-2. Measure win rate by opportunity type
-3. Optimize parameters for future runs
-4. Validate arbitrage detection algorithms
+**Files**: `clipper-desk-manager.js:calculateFairValue()`, `calculateEdge()`
 
 ---
 
-## 🚀 Ready to Deploy
+### 2. OPENER (Trend Continuation)
 
-**Final Checklist:**
+**Purpose**: Pre-bid on next window based on current momentum
 
-- [x] Credentials loaded
-- [x] External data sources working
-- [x] Risk parameters configured
-- [x] Logging directory created
-- [x] Real trading enabled
-- [x] Daemon script ready
-
-**Launch Command:**
-
-```bash
-cd /Users/admin/Documents/Clawdbot
-source .polymarket-credentials.env
-.claude/skills/polymarket-trader/scripts/daemon.sh
+**Logic**:
+```
+IF current window has strong momentum (YES > 55% or < 45%)
+AND delta > 0.08%
+THEN bid $0.51 on NEXT window's same direction
 ```
 
-**Monitor:**
+**Parameters**:
+- `OPENER_TARGET_PRICE`: 0.51
+- `OPENER_MAX_PRICE`: 0.54
+- `OPENER_WINDOW`: 60-10 seconds before close
 
-```bash
-tail -f ~/.polymarket-trader/logs/latest.log
+**Files**: `clipper-desk-manager.js:evaluateOpenerOpportunity()`, `executeOpenerBet()`
+
+---
+
+### 3. DIP SCALPER (Rebound)
+
+**Purpose**: Buy panic dips when Binance says trend is intact
+
+**Logic**:
+```
+IF polymarket price dips to $0.47
+AND binance delta > -0.05% (trend intact)
+THEN buy the dip
+WHEN price rebounds to $0.75 THEN sell (60% profit)
 ```
 
-Good luck with your scientific experiment! 🦞📈
+**Parameters**:
+- `DIP_BUY_PRICE`: 0.47
+- `DIP_SCALP_TARGET_PCT`: 1.60 (60% profit)
+- `DIP_TIME_STOP_SECONDS`: 60 (force sell before close)
+- `DIP_STOP_LOSS_PCT`: -0.05% (exit if trend breaks)
+
+**Files**: `clipper-desk-manager.js:evaluateDipOpportunity()`, `executeDipBuy()`, `checkDipAutoFlip()`
+
+---
+
+### 4. LOTTO (Moonshot Tickets)
+
+**Purpose**: Buy cheap tickets when volatility suggests possible reversal
+
+**Logic**:
+```
+IF price <= $0.025 (2.5 cents)
+AND volatility > 0.05%
+AND 180s > timeLeft > 30s
+THEN buy $1 lotto ticket (potential 50x)
+```
+
+**Parameters**:
+- `LOTTO_MAX_PRICE`: 0.025
+- `LOTTO_BET_SIZE`: 1.00 (dollars)
+- `LOTTO_MIN_VOLATILITY`: 0.05%
+
+**Files**: `clipper-desk-manager.js:scanForLottoTickets()`, `executeLottoBuy()`
+
+---
+
+### 5. EMERGENCY BRAKE (Capital Preservation)
+
+**Purpose**: Protect capital during market crashes
+
+**Logic**:
+```
+IF binance delta > +0.40% OR < -0.40%
+THEN cancel all open bids
+AND panic sell YES positions if crashing
+```
+
+**Files**: `execution-desk.js:emergencyCancelAllBuys()`, `emergencyPanicSell()`
+
+---
+
+## Oracle System
+
+### oracle-desk.js (WebSocket)
+
+Real-time price streaming via Binance WebSocket:
+
+```javascript
+ws = new WebSocket('wss://stream.binance.com:9443/ws/btcusdt@trade')
+```
+
+**Features**:
+- ~200ms faster than REST API
+- Calculates: delta, deltaPct, volatility
+- Safety flags: isCrashing, isPumping, isChoppy
+- Auto-reconnect on disconnect
+
+### binance-oracle.js (REST API)
+
+Fallback for WebSocket + additional features:
+
+**Functions**:
+- `getBinancePrice()` - Quick REST price check
+- `detectLatencyEdge()` - Compare Binance vs Polymarket pricing
+- `quickDeltaCheck()` - Fast delta calculation
+- `getNextBtcMarket()` - Discover upcoming markets via Gamma API
+
+---
+
+## Execution System
+
+### execution-desk.js
+
+Interfaces with `pmarket-cli` for order management.
+
+**Order Types**:
+- `placeBuyOrder()` - Buy with retry logic
+- `placeSellOrder()` - Sell with retry logic
+- `placeDipBuyWithAutoFlip()` - Buy + automatic sell at target
+
+**Auto-Flip Logic**:
+```javascript
+// When buy fills, automatically post sell at target
+activeFlipOrders.set(orderId, {
+  entryPrice: 0.47,
+  targetPrice: 0.75,
+  status: 'HOLDING'
+})
+```
+
+**Emergency Functions**:
+- `emergencyCancelAllBuys()` - Cancel all open orders
+- `emergencyPanicSell()` - Dump positions at any price
+
+---
+
+## Treasury System
+
+### treasury-desk.js
+
+Automatic redemption of winning positions.
+
+**Heartbeat**: Every 5 minutes
+
+**Process**:
+1. Scan for redeemable positions
+2. Call `pmarket-cli -r` for each
+3. Convert winning shares to USDC
+4. Log all redemptions to `treasury-log.json`
+
+**Functions**:
+- `redeemAllWinnings()` - Main redemption scan
+- `redeemToken(tokenId)` - Redeem specific token
+- `getPositions()` - Get current holdings
+- `startHeartbeat()` - Start background loop
+
+---
+
+## Decision Flow
+
+```
+Every 5 seconds:
+
+1. EMERGENCY CHECK
+   │
+   ├─ Binance delta > ±0.40%? ──▶ HALT + Cancel + Panic Sell
+   │
+   ▼
+2. LOTTO CHECK (if 180-30s remaining)
+   │
+   ├─ Price ≤ $0.025 + High volatility? ──▶ Buy $1 ticket
+   │
+   ▼
+3. OPENER CHECK (if 60-10s remaining)
+   │
+   ├─ Strong momentum? ──▶ Pre-bid $0.51 on next window
+   │
+   ▼
+4. SNIPER CHECK (if 300-120s remaining)
+   │
+   ├─ Fair value edge ≥ 3%? ──▶ Place limit order
+   │
+   ▼
+5. DIP SCALPER CHECK (continuous)
+   │
+   ├─ Monitor existing dips for auto-flip
+   ├─ Scan for new $0.47 dip opportunities
+   │
+   ▼
+6. Wait 5 seconds, repeat
+```
+
+---
+
+## Deployment
+
+### Start Bot
+
+```bash
+cd /Users/admin/Documents/Clawdbot/.claude/skills/polymarket-trader/scripts
+nohup node asymmetric-edge-bot.js > bot.log 2>&1 &
+```
+
+### Stop Bot
+
+```bash
+pkill -f asymmetric-edge-bot
+```
+
+### View Logs
+
+```bash
+tail -f bot.log                    # Live view
+grep SUCCESS bot.log | tail -20    # Recent wins
+grep ERROR bot.log | tail -10      # Errors
+grep TREASURY bot.log | tail -10   # Redemptions
+```
+
+---
+
+## Configuration
+
+### Environment Variables
+
+```bash
+# .env file
+MOONSHOT_API_KEY=sk-xxx  # Optional: AI consultation
+```
+
+### Strategy Parameters
+
+Edit `clipper-desk-manager.js`:
+
+```javascript
+// Fair Value
+MAX_PRICE_CAP = 0.85
+MIN_EDGE_PCT = 3.0
+
+// Opener
+OPENER_TARGET_PRICE = 0.51
+OPENER_MAX_PRICE = 0.54
+
+// Dip Scalper
+DIP_BUY_PRICE = 0.47
+DIP_MIN_REBOUND_PRICE = 0.75
+
+// Lotto
+LOTTO_MAX_PRICE = 0.025
+LOTTO_BET_SIZE = 1.00
+LOTTO_MIN_VOLATILITY = 0.05
+
+// Treasury
+REDEMPTION_INTERVAL_MS = 5 * 60 * 1000
+```
+
+### Balance Configuration
+
+Edit `asymmetric-edge-bot.js`:
+
+```javascript
+const MANUAL_BALANCE = 36.36;  // Match Polymarket GUI
+```
+
+---
+
+## Log Format
+
+All logs are JSON for easy parsing:
+
+```json
+{
+  "action": "CLIPPER_BET_SUCCESS",
+  "window": "btc-updown-15m-1769802300",
+  "side": "YES",
+  "shares": "10.50",
+  "avgPrice": "0.475",
+  "cost": "$5.00",
+  "edge": "8.2%",
+  "expectedProfit": "$0.86",
+  "timestamp": "2026-01-30T21:15:30.123Z"
+}
+```
+
+---
+
+## Troubleshooting
+
+### Bot Not Trading
+
+1. Check logs for `CLIPPER_NO_EDGE` - prices may not have edge
+2. Verify `MAX_PRICE_CAP` isn't blocking trades
+3. Ensure sufficient balance
+
+### Orders Not Filling
+
+1. Check `EXECUTION_DESK_BUY_UNFILLED` logs
+2. Price may have moved too fast
+3. Consider adjusting slippage
+
+### Treasury Not Redeeming
+
+1. Check `TREASURY_SCAN_COMPLETE` logs
+2. May not have winning positions
+3. Markets may not be resolved yet
+
+### WebSocket Disconnects
+
+1. Bot auto-reconnects (see `ORACLE_DISCONNECTED`)
+2. Check internet connection
+3. Binance may be under maintenance
+
+---
+
+## Security Notes
+
+- API keys stored in `.env` (gitignored)
+- No private keys in code
+- Uses pmarket-cli for wallet operations
+- Emergency brake protects capital
+
+---
+
+## Dependencies
+
+- Node.js v18+
+- ws (WebSocket)
+- dotenv (env vars)
+- pmarket-cli (Polymarket CLI)
+
+---
+
+## Version History
+
+- v2.0: Fair value system, 5 strategies, auto-redemption, treasury desk
+- v1.x: Basic momentum trading (deprecated)
