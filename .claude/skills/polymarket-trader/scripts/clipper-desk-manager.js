@@ -149,11 +149,10 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder, wind
     // Bet on the LIKELY WINNER (FIX #1: Buy winning side)
     const likelyWinner = delta > 0 ? 'YES' : 'NO';
 
-    // FIX #2 & #4: Use VERY AGGRESSIVE pricing to ensure fills
+    // AGGRESSIVE: Always bid 0.99 to guarantee fill
     const targetPrice = likelyWinner === 'YES' ? market.yesPrice : market.noPrice;
     const tokenId = likelyWinner === 'YES' ? market.yesTokenId : market.noTokenId;
-    // Use 20 cents slippage OR pay up to 98 cents to guarantee fill
-    const maxPrice = Math.min(0.98, targetPrice + 0.20);
+    const maxPrice = 0.99; // Pay whatever it takes to fill
 
     // MINIMUM 5 SHARES required by Polymarket - calculate min bet
     const minShares = 5;

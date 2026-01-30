@@ -182,9 +182,9 @@ async function redeemWinningPositions(windowSlug, winner) {
  */
 function fetchBalance() {
   try {
-    // MANUAL BALANCE SETTING (update this number as you grow!)
-    // Current as of: 2026-01-29 17:20
-    const MANUAL_BALANCE = 40.00; // Your actual Polymarket cash balance
+    // MANUAL BALANCE SETTING (update this to match Polymarket GUI!)
+    // Current as of: 2026-01-30 17:10
+    const MANUAL_BALANCE = 36.36; // Your actual Polymarket cash balance
 
     MEMORY.activeBalance = MANUAL_BALANCE;
 
@@ -872,10 +872,10 @@ async function tradingLoop() {
       const windowState = getWindowState(window.slug);
 
       // ============================================================
-      // CLIPPER DESK: DIRECTIONAL BET (420-360s before close = 7-6 min)
+      // CLIPPER DESK: DIRECTIONAL BET (480-300s before close = 8-5 min)
       // Trading earlier for better liquidity
       // ============================================================
-      const inStraddleWindow = window.timeLeft <= 420 && window.timeLeft > 360;
+      const inStraddleWindow = window.timeLeft <= 480 && window.timeLeft > 300;
       if (inStraddleWindow && !windowState.clipperStraddlePlaced) {
         try {
           const market = await getCurrentMarket(window);
