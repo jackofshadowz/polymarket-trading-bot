@@ -1,0 +1,61 @@
+# Sensitive Files - NEVER COMMIT
+*.env
+.env*
+*credentials*
+*.key
+*.pem
+config.json
+.pmarket-cli/
+.polymarket-trader/
+
+# API Keys and Secrets
+*API_KEY*
+*SECRET*
+*PASSPHRASE*
+
+# Database Files (may contain trading history)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Memory and State Files
+memory.json
+*.log
+logs/
+
+# Node modules
+node_modules/
+package-lock.json
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+
+# Build outputs
+dist/
+build/
+*.tsbuildinfo
+
+# Test coverage
+coverage/
+.nyc_output/
