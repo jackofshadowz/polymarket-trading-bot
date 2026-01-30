@@ -240,7 +240,7 @@ function placeBuyOrder(tokenId, amountUSDC, price, options = {}) {
 
       if (orderResult.success) {
         const fillResult = {
-          success: true,
+          success: orderResult.status === 'matched', // Only success if actually filled!
           orderID: orderResult.orderID,
           status: orderResult.status,
           sharesReceived: parseFloat(orderResult.takingAmount) || 0,
@@ -255,18 +255,31 @@ function placeBuyOrder(tokenId, amountUSDC, price, options = {}) {
           fillResult.avgFillPrice = fillResult.costUSDC / fillResult.sharesReceived;
         }
 
-        console.log(JSON.stringify({
-          action: 'EXECUTION_DESK_BUY_SUCCESS',
-          orderID: fillResult.orderID,
-          shares: fillResult.sharesReceived,
-          cost: fillResult.costUSDC.toFixed(2),
-          avgPrice: fillResult.avgFillPrice.toFixed(4),
-          status: fillResult.status,
-          attempt: attempt,
-          timestamp: new Date().toISOString()
-        }));
-
-        return fillResult;
+        // Only count as success if order was actually matched/filled
+        if (orderResult.status === 'matched') {
+          console.log(JSON.stringify({
+            action: 'EXECUTION_DESK_BUY_SUCCESS',
+            orderID: fillResult.orderID,
+            shares: fillResult.sharesReceived,
+            cost: fillResult.costUSDC.toFixed(2),
+            avgPrice: fillResult.avgFillPrice.toFixed(4),
+            status: fillResult.status,
+            attempt: attempt,
+            timestamp: new Date().toISOString()
+          }));
+          return fillResult;
+        } else {
+          // Order went "live" but didn't fill - treat as failure and retry
+          console.log(JSON.stringify({
+            action: 'EXECUTION_DESK_BUY_UNFILLED',
+            orderID: fillResult.orderID,
+            status: fillResult.status,
+            reason: 'Order placed but not matched - price too low',
+            attempt: attempt,
+            timestamp: new Date().toISOString()
+          }));
+          lastError = 'Order live but not filled - need higher price';
+        }
       } else {
         lastError = orderResult.errorMsg || 'Order failed';
       }
