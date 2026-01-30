@@ -1073,13 +1073,8 @@ async function tradingLoop() {
       const windowPriceData = windowPriceTracker.getWindowPriceData(window.slug);
       const consultationWindow = CONFIG.kimiConsultationWindow;
 
-      const shouldOrchestrate = (
-        // Check if MOONSHOT_API_KEY is available
-        process.env.MOONSHOT_API_KEY &&
-        !windowState.fivePlayerConsulted &&
-        // Orchestration window: 850s remaining (100s into window)
-        window.timeLeft <= 850 && window.timeLeft > 750
-      );
+      // AI ORCHESTRATION DISABLED - using simple price-based rules instead
+      const shouldOrchestrate = false;
 
       // ============================================================
       // 7-PLAYER ORCHESTRATION (Farm, Degen, Clipper, Supervisor)
