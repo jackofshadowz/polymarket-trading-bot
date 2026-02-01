@@ -92,13 +92,15 @@ pkill -f asymmetric-edge-bot
 | File | Purpose |
 |------|---------|
 | `asymmetric-edge-bot.js` | Main orchestrator |
-| `wealth-fortress.js` | **NEW:** Profit protection & capital preservation |
+| `wealth-fortress.js` | Profit protection & capital preservation |
+| `black-box-recorder.js` | **NEW:** Flight data recorder - captures all decisions |
 | `oracle-desk.js` | Real-time Binance WebSocket |
 | `binance-oracle.js` | REST API + market discovery |
 | `clipper-desk-manager.js` | All 5 trading strategies |
 | `execution-desk.js` | Order execution + auto-flip |
 | `treasury-desk.js` | Auto-redemption every 5 min |
 | `virtual-account-manager.js` | Position & P&L tracking |
+| `flight_data/` | **NEW:** Episode recordings (JSON files for analysis) |
 
 ## Configuration
 
@@ -339,6 +341,61 @@ See `DEPLOYMENT.md` for full technical documentation.
 
 ---
 
+## Black Box Recorder (Data Analysis)
+
+**NEW IN v2.1:** Every window is recorded as a "flight data" episode.
+
+### What Gets Recorded
+
+| Data Type | Description |
+|-----------|-------------|
+| **Timeline** | Second-by-second BTC, Poly prices, volatility |
+| **Decisions** | Every strategy check + why we did/didn't trade |
+| **Actions** | Actual trades with prices and P&L |
+| **Counterfactuals** | "What if?" analysis at window close |
+
+### Why This Matters
+
+After 50 windows, you can ask:
+- *"What volatility yields the best lotto win rate?"*
+- *"How many profitable dips did we miss?"*
+- *"What's our win rate when delta > 0.2%?"*
+
+### Viewing Episode Data
+
+```bash
+# View latest episode
+ls -t scripts/flight_data/*.json | head -1 | xargs cat | jq '.'
+
+# Count episodes
+ls scripts/flight_data/*.json 2>/dev/null | wc -l
+
+# View aggregate stats
+cat scripts/flight_data/aggregate_stats.json | jq '.'
+
+# Find missed opportunities
+grep -l '"missedLotto": true' scripts/flight_data/*.json | wc -l
+```
+
+### Example Episode Output
+
+```json
+{
+  "decisions": [
+    { "strategy": "LOTTO_SCAN", "outcome": "REJECTED", "reason": "Low volatility" },
+    { "strategy": "SNIPER_EDGE", "outcome": "ACCEPTED", "reason": "8% edge found" }
+  ],
+  "counterfactuals": {
+    "missedLotto": false,
+    "missedDip": true
+  },
+  "performance": {
+    "pnl": 4.80,
+    "won": true
+  }
+}
+```
+
 ## Quick Reference Card
 
 ```
@@ -353,6 +410,7 @@ See `DEPLOYMENT.md` for full technical documentation.
 │  CHECK FORTRESS:  grep WEALTH_FORTRESS bot.log | tail -3        │
 │  CHECK TRADES:    grep SUCCESS bot.log | tail -10               │
 │  CHECK ERRORS:    grep ERROR bot.log | tail -5                  │
+│  CHECK EPISODES:  ls scripts/flight_data/*.json | wc -l         │
 │                                                                  │
 ├─────────────────────────────────────────────────────────────────┤
 │  PROTECTION TIERS:                                               │
@@ -362,6 +420,12 @@ See `DEPLOYMENT.md` for full technical documentation.
 │                                                                  │
 │  PRINCIPAL SHIELD: Activated when balance ≥ 2× initial          │
 │  RATCHET: Auto-locks 50% of profits at new ATH                  │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  BLACK BOX RECORDER:                                             │
+│  ├── Episodes saved to: scripts/flight_data/                    │
+│  ├── Tracks: decisions, actions, counterfactuals                │
+│  └── Use for: optimization, debugging, backtesting              │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```

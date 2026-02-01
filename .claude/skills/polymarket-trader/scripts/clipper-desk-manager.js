@@ -4,6 +4,7 @@
 // ============================================================
 
 const virtualAccounts = require('./virtual-account-manager');
+const blackBoxRecorder = require('./black-box-recorder');
 
 // ============================================================
 // FAIR VALUE CALCULATION - The heart of profitable trading
@@ -508,6 +509,20 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder, wind
           : `Edge too small (${edgeInfo.edgePct.toFixed(1)}% < ${MIN_EDGE_PCT}% required)`,
         timestamp: new Date().toISOString()
       }));
+
+      // BLACK BOX: Log the rejection reason
+      blackBoxRecorder.logDecision('SNIPER_EDGE', 'REJECTED', 'No edge', {
+        betSide: betSide,
+        fairValue: sideFairValue,
+        marketPrice: marketPrice,
+        edgePct: edgeInfo.edgePct,
+        expectedValue: edgeInfo.expectedValue,
+        recommendation: edgeInfo.recommendation,
+        deltaPct: deltaPct,
+        timeLeft: timeLeftSeconds,
+        significant: true
+      });
+
       return false;
     }
 
@@ -525,8 +540,31 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder, wind
         riskReward: `Risk $${marketPrice.toFixed(2)} to make $${(1 - marketPrice).toFixed(2)}`,
         timestamp: new Date().toISOString()
       }));
+
+      // BLACK BOX: Log price rejection
+      blackBoxRecorder.logDecision('SNIPER_EDGE', 'REJECTED', 'Price too high', {
+        betSide: betSide,
+        marketPrice: marketPrice,
+        maxAllowed: MAX_PRICE_CAP,
+        wouldRisk: marketPrice,
+        wouldMake: 1 - marketPrice,
+        significant: true
+      });
+
       return false;
     }
+
+    // BLACK BOX: Log that we're proceeding with the trade
+    blackBoxRecorder.logDecision('SNIPER_EDGE', 'ACCEPTED', 'Edge found - executing', {
+      betSide: betSide,
+      fairValue: sideFairValue,
+      marketPrice: marketPrice,
+      edgePct: edgeInfo.edgePct,
+      expectedValue: edgeInfo.expectedValue,
+      recommendation: edgeInfo.recommendation,
+      deltaPct: deltaPct,
+      timeLeft: timeLeftSeconds
+    });
 
     // ============================================================
     // EXECUTE TRADE - Use limit order at fair value (not market!)
@@ -850,6 +888,10 @@ function getClippablePositions(clipperPositions, market) {
 function evaluateDipOpportunity(market, binanceData, windowSlug, timeLeft) {
   // Don't fish for dips in last 2 minutes (not enough time to flip)
   if (timeLeft < 120) {
+    blackBoxRecorder.logDecision('DIP_CHECK', 'SKIPPED', 'Not enough time for dip flip', {
+      timeLeft: timeLeft,
+      minRequired: 120
+    });
     return null;
   }
 
@@ -863,6 +905,13 @@ function evaluateDipOpportunity(market, binanceData, windowSlug, timeLeft) {
   const isBinanceBullish = binanceData && binanceData.deltaPct >= DIP_STOP_LOSS_PCT;
 
   if (!isBinanceBullish) {
+    blackBoxRecorder.logDecision('DIP_CHECK', 'REJECTED', 'Trend broken', {
+      binanceDelta: binanceData ? binanceData.deltaPct : null,
+      stopLossThreshold: DIP_STOP_LOSS_PCT,
+      yesPrice: market.yesPrice,
+      noPrice: market.noPrice,
+      significant: true
+    });
     return {
       action: 'SKIP',
       reason: `Trend broken (Binance delta: ${binanceData ? binanceData.deltaPct.toFixed(2) : 'N/A'}%)`
@@ -872,6 +921,14 @@ function evaluateDipOpportunity(market, binanceData, windowSlug, timeLeft) {
   // Check if YES price has dipped to our target
   // When YES dips to $0.47, panic sellers are dumping
   if (market.yesPrice <= DIP_BUY_PRICE) {
+    blackBoxRecorder.logDecision('DIP_CHECK', 'ACCEPTED', 'YES dip detected', {
+      side: 'YES',
+      dipPrice: market.yesPrice,
+      targetBuy: DIP_BUY_PRICE,
+      targetSell: DIP_MIN_REBOUND_PRICE,
+      binanceDelta: binanceData.deltaPct,
+      potentialProfit: ((DIP_MIN_REBOUND_PRICE - DIP_BUY_PRICE) / DIP_BUY_PRICE * 100).toFixed(0) + '%'
+    });
     return {
       action: 'BUY_DIP_YES',
       side: 'YES',
@@ -883,6 +940,14 @@ function evaluateDipOpportunity(market, binanceData, windowSlug, timeLeft) {
 
   // Check if NO price has dipped (when YES pumps, NO panics)
   if (market.noPrice <= DIP_BUY_PRICE) {
+    blackBoxRecorder.logDecision('DIP_CHECK', 'ACCEPTED', 'NO dip detected', {
+      side: 'NO',
+      dipPrice: market.noPrice,
+      targetBuy: DIP_BUY_PRICE,
+      targetSell: DIP_MIN_REBOUND_PRICE,
+      binanceDelta: binanceData.deltaPct,
+      potentialProfit: ((DIP_MIN_REBOUND_PRICE - DIP_BUY_PRICE) / DIP_BUY_PRICE * 100).toFixed(0) + '%'
+    });
     return {
       action: 'BUY_DIP_NO',
       side: 'NO',
@@ -891,6 +956,14 @@ function evaluateDipOpportunity(market, binanceData, windowSlug, timeLeft) {
       rationale: `NO dipped to ${(market.noPrice * 100).toFixed(0)}¢ but Binance is ${binanceData.deltaPct < 0 ? 'DOWN' : 'FLAT'} - buy the panic`
     };
   }
+
+  // No dip opportunity - log for counterfactual analysis
+  blackBoxRecorder.logDecision('DIP_CHECK', 'SKIPPED', 'No dip available', {
+    yesPrice: market.yesPrice,
+    noPrice: market.noPrice,
+    dipThreshold: DIP_BUY_PRICE,
+    binanceDelta: binanceData?.deltaPct
+  });
 
   return null; // No dip opportunity
 }
@@ -1104,11 +1177,19 @@ function getActiveDipPositions() {
 function scanForLottoTickets(market, volatility, windowSlug, timeLeft) {
   // CHECK 1: Timing - only late game (3 min to 30 sec)
   if (timeLeft > LOTTO_TIME_WINDOW_START || timeLeft < LOTTO_TIME_WINDOW_END) {
+    blackBoxRecorder.logDecision('LOTTO_SCAN', 'SKIPPED', 'Outside lotto window', {
+      timeLeft: timeLeft,
+      windowStart: LOTTO_TIME_WINDOW_START,
+      windowEnd: LOTTO_TIME_WINDOW_END
+    });
     return null;
   }
 
   // CHECK 2: Already bought a lotto this window
   if (lottoTicketsPurchased[windowSlug]) {
+    blackBoxRecorder.logDecision('LOTTO_SCAN', 'SKIPPED', 'Already purchased this window', {
+      windowSlug: windowSlug
+    });
     return null;
   }
 
@@ -1128,6 +1209,13 @@ function scanForLottoTickets(market, volatility, windowSlug, timeLeft) {
   }
 
   if (!targetSide) {
+    blackBoxRecorder.logDecision('LOTTO_SCAN', 'REJECTED', 'No cheap tickets available', {
+      yesPrice: market.yesPrice,
+      noPrice: market.noPrice,
+      maxPrice: LOTTO_MAX_PRICE,
+      timeLeft: timeLeft,
+      significant: true // Mark as significant for analysis
+    });
     return null; // No cheap tickets available
   }
 
@@ -1135,6 +1223,14 @@ function scanForLottoTickets(market, volatility, windowSlug, timeLeft) {
   // Only buy if Binance shows BTC is moving FAST
   // A flat market = guaranteed loss. Volatile = moonshot potential.
   if (volatility < LOTTO_MIN_VOLATILITY) {
+    blackBoxRecorder.logDecision('LOTTO_SCAN', 'REJECTED', 'Low volatility', {
+      price: entryPrice,
+      side: targetSide,
+      volatility: volatility,
+      required: LOTTO_MIN_VOLATILITY,
+      timeLeft: timeLeft,
+      significant: true // This is the key filter - important to track
+    });
     return {
       available: true,
       skipped: true,
@@ -1143,6 +1239,16 @@ function scanForLottoTickets(market, volatility, windowSlug, timeLeft) {
       price: entryPrice
     };
   }
+
+  // Log that we're accepting this lotto opportunity
+  blackBoxRecorder.logDecision('LOTTO_SCAN', 'ACCEPTED', 'Valid lotto setup', {
+    price: entryPrice,
+    side: targetSide,
+    volatility: volatility,
+    required: LOTTO_MIN_VOLATILITY,
+    timeLeft: timeLeft,
+    payoffPotential: Math.floor(1.0 / entryPrice) + 'x'
+  });
 
   // JACKPOT! Cheap ticket + high volatility = BUY
   const shares = Math.floor(LOTTO_BET_SIZE / (entryPrice + 0.01)); // Pay 1 cent premium

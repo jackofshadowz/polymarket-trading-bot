@@ -29,6 +29,7 @@ const executionDesk = require('./execution-desk');
 const binanceOracle = require('./binance-oracle');
 const treasuryDesk = require('./treasury-desk');
 const wealthFortress = require('./wealth-fortress');
+const blackBoxRecorder = require('./black-box-recorder');
 
 // ============================================================
 // STRATEGY CONFIG
@@ -739,6 +740,17 @@ async function tradingLoop() {
               winner
             );
 
+            // ============================================================
+            // BLACK BOX RECORDER: Finalize episode with outcome
+            // ============================================================
+            blackBoxRecorder.finalizeEpisode({
+              winner: winner,
+              finalBtcPrice: closingData.closePrice,
+              finalDelta: closingData.deltaPct || 0,
+              finalYesPrice: winner === 'YES' ? 1.0 : 0.0,
+              finalNoPrice: winner === 'NO' ? 1.0 : 0.0
+            });
+
             // SETTLE DESK P&L (7-player system: Farm + Degen + Clipper)
             const windowState = MEMORY.windowState[MEMORY.currentWindow.slug];
             if (windowState && windowState.fivePlayerConsulted) {
@@ -873,6 +885,23 @@ async function tradingLoop() {
 
         // Refresh balance for new window
         fetchBalance();
+
+        // ============================================================
+        // BLACK BOX RECORDER: Start new episode
+        // ============================================================
+        const fortressReport = wealthFortress.getReport();
+        blackBoxRecorder.startNewEpisode({
+          slug: window.slug,
+          btcOpenPrice: CURRENT_PRICE,
+          yesPrice: 0.50, // Will be updated when market data arrives
+          noPrice: 0.50,
+          timeLeft: window.timeLeft,
+          fortressPhase: fortressReport.phase,
+          totalEquity: parseFloat(fortressReport.totalEquity),
+          vault: parseFloat(fortressReport.vault),
+          warChest: parseFloat(fortressReport.warChest),
+          principalSecured: fortressReport.principalStatus.includes('SECURED')
+        });
       }
 
       // UPDATE CURRENT PRICE & DELTA
@@ -1024,6 +1053,21 @@ async function tradingLoop() {
         await new Promise(resolve => setTimeout(resolve, CONFIG.priceCheckInterval));
         continue;
       }
+
+      // ============================================================
+      // BLACK BOX RECORDER: Record tick data
+      // ============================================================
+      const windowPriceDataForTick = windowPriceTracker.getWindowPriceData(window.slug);
+      blackBoxRecorder.recordTick({
+        btcPrice: CURRENT_PRICE,
+        yesPrice: market.yesPrice,
+        noPrice: market.noPrice,
+        delta: windowPriceDataForTick?.delta || 0,
+        deltaPct: windowPriceDataForTick?.deltaPct || 0,
+        volatility: oracleVolatility || 0,
+        oracleDelta: binanceData?.deltaPct || null,
+        timeLeft: window.timeLeft
+      });
 
       // ============================================================
       // EMERGENCY BRAKE - Check if Binance is crashing/pumping
@@ -1910,6 +1954,25 @@ async function tradingLoop() {
               cost: edge.betSize.toFixed(2),
               timestamp: new Date().toISOString()
             }));
+
+            // ============================================================
+            // BLACK BOX RECORDER: Log the action
+            // ============================================================
+            blackBoxRecorder.logAction('BUY', {
+              side: edge.side,
+              price: orderResult.avgFillPrice,
+              shares: orderResult.totalShares,
+              cost: edge.betSize,
+              strategy: edge.valueTier || edge.source,
+              tokenId: edge.tokenId,
+              orderId: orderResult.orderID,
+              desk: edge.desk,
+              estimatedPnL: (1.0 - orderResult.avgFillPrice) * orderResult.totalShares,
+              metadata: {
+                edgeRatio: edge.edgeRatio,
+                lottoTicket: edge.lottoTicket || false
+              }
+            });
           }
 
           // Update state

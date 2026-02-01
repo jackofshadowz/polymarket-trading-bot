@@ -45,7 +45,8 @@
 ```
 scripts/
 ├── asymmetric-edge-bot.js      # Main entry point & orchestrator
-├── wealth-fortress.js          # NEW: Profit protection & capital preservation
+├── wealth-fortress.js          # Profit protection & capital preservation
+├── black-box-recorder.js       # NEW: Flight data recorder for all decisions
 ├── oracle-desk.js              # Real-time Binance WebSocket stream
 ├── binance-oracle.js           # REST API fallback + market discovery
 ├── clipper-desk-manager.js     # All 5 trading strategies
@@ -57,6 +58,7 @@ scripts/
 ├── market-data-aggregator.js   # Data aggregation utilities
 ├── dialogue-recorder.js        # Trade decision logging
 ├── leaderboard-tracker.js      # Performance tracking
+├── flight_data/                # NEW: Episode recordings (JSON files)
 └── .env                        # API keys (not committed)
 ```
 
@@ -664,13 +666,226 @@ All logs are JSON for easy parsing:
 | v2.0 | 2026-01-30 | Fair value system, 5 strategies, auto-redemption, treasury desk |
 | v1.x | Legacy | Basic momentum trading (deprecated)
 
-### v2.1 Changelog (Wealth Fortress)
+### v2.1 Changelog (Wealth Fortress + Black Box)
 
 - **NEW:** `wealth-fortress.js` - Capital preservation system
+- **NEW:** `black-box-recorder.js` - Flight data recorder for all decisions
 - **NEW:** Vault/War Chest split (dynamic based on balance tier)
 - **NEW:** Principal Shield (lock original investment when doubled)
 - **NEW:** Ratchet system (auto-lock 50% of profits at new ATH)
 - **NEW:** Phase-based risk curve (BUILDER → GROWTH → WEALTH)
+- **NEW:** Complete episode recording with counterfactual analysis
+- **NEW:** Decision traces for every strategy check
 - **CHANGED:** Trading desks now see War Chest, not total equity
 - **CHANGED:** Balance sync triggers Wealth Fortress protection
 - **ADDED:** Wealth Fortress status in STATUS logs
+- **ADDED:** `flight_data/` directory with JSON episode files
+
+---
+
+## Black Box Recorder (Quantitative Research Engine)
+
+### Purpose: Turn Data Into Optimization
+
+The Black Box Recorder captures **everything** about each 15-minute window:
+- Tick-by-tick price and volatility data
+- Every decision made (AND every decision NOT made)
+- Actual trades executed
+- Counterfactual analysis ("what if?")
+
+After 50 windows, you can ask questions like:
+> "What volatility threshold yields the highest win rate for Lotto tickets?"
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                      BLACK BOX RECORDER                              │
+│                   Flight Data Recorder System                        │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │                    EPISODE RECORDING                        │     │
+│  │                                                             │     │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │     │
+│  │  │   TIMELINE   │  │  DECISIONS   │  │    ACTIONS       │  │     │
+│  │  │              │  │              │  │                  │  │     │
+│  │  │ t=1: $98000  │  │ LOTTO_SCAN   │  │ BUY YES @ $0.52  │  │     │
+│  │  │ t=2: $98001  │  │ → REJECTED   │  │ Shares: 10       │  │     │
+│  │  │ t=3: $97998  │  │   "Low Vol"  │  │ Cost: $5.20      │  │     │
+│  │  │ ...         │  │              │  │                  │  │     │
+│  │  │ t=850: $97900│  │ DIP_CHECK    │  │                  │  │     │
+│  │  │ (every sec)  │  │ → ACCEPTED   │  │                  │  │     │
+│  │  └──────────────┘  └──────────────┘  └──────────────────┘  │     │
+│  │                                                             │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │                  HINDSIGHT ENGINE                           │     │
+│  │                                                             │     │
+│  │  Counterfactual Analysis:                                   │     │
+│  │  ┌──────────────────────────────────────────────────────┐  │     │
+│  │  │ missedLotto: true  (YES hit $0.02, would have 50x'd) │  │     │
+│  │  │ missedDip: false   (we caught the $0.47 dip)         │  │     │
+│  │  │ maxEdge: 15%       (best entry was 15% below fair)   │  │     │
+│  │  │ avgVolatility: 0.08%                                  │  │     │
+│  │  └──────────────────────────────────────────────────────┘  │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌────────────────────────────────────────────────────────────┐     │
+│  │              flight_data/btc-15m-xxx.json                   │     │
+│  └────────────────────────────────────────────────────────────┘     │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### What Gets Recorded
+
+| Data Type | Description | Use Case |
+|-----------|-------------|----------|
+| **Timeline** | Second-by-second BTC price, Poly price, volatility | Chart reconstruction, pattern detection |
+| **Decisions** | Every strategy check with outcome + reason | Debug logic, optimize thresholds |
+| **Actions** | Actual trades with prices, shares, P&L | Performance tracking |
+| **Counterfactuals** | "What if" analysis | Find missed opportunities |
+
+### Decision Trace Example
+
+```json
+{
+  "timestamp": "2026-01-31T14:13:00Z",
+  "secondsIn": 180,
+  "strategy": "LOTTO_SCAN",
+  "outcome": "REJECTED",
+  "reason": "Low volatility",
+  "context": {
+    "price": 0.02,
+    "volatility": 0.01,
+    "required": 0.05,
+    "timeLeft": 120,
+    "significant": true
+  }
+}
+```
+
+### Counterfactual Analysis
+
+At the end of each window, the recorder analyzes what WOULD have happened:
+
+| Counterfactual | Question | Learning |
+|----------------|----------|----------|
+| `missedLotto` | Was there a winning $0.02 ticket we didn't buy? | Tune volatility threshold |
+| `missedDip` | Did a $0.47→$0.75 dip scalp occur that we missed? | Tune delta threshold |
+| `maxEdgeAvailable` | What was the best entry point we could have had? | Improve timing |
+| `avgVolatility` | What was the volatility profile of this window? | Categorize conditions |
+
+### Episode File Structure
+
+```json
+{
+  "id": "btc-updown-15m-1769802300",
+  "startTime": 1706720100000,
+  "marketSlug": "btc-updown-15m-1769802300",
+
+  "initialState": {
+    "btcOpenPrice": 98000,
+    "polyYesPrice": 0.50,
+    "polyNoPrice": 0.50
+  },
+
+  "fortressState": {
+    "phase": "BUILDER",
+    "totalEquity": 180.00,
+    "vault": 72.00,
+    "warChest": 86.40
+  },
+
+  "timeline": [
+    { "t": 1, "btc": 98001, "yes": 0.52, "no": 0.48, "vol": 0.01, "timeLeft": 899 },
+    { "t": 2, "btc": 98000, "yes": 0.52, "no": 0.48, "vol": 0.01, "timeLeft": 898 },
+    ...
+  ],
+
+  "decisions": [
+    { "strategy": "LOTTO_SCAN", "outcome": "REJECTED", "reason": "Low Vol" },
+    { "strategy": "SNIPER_EDGE", "outcome": "ACCEPTED", "reason": "Edge found" }
+  ],
+
+  "actions": [
+    { "type": "BUY", "side": "YES", "price": 0.52, "shares": 10, "cost": 5.20 }
+  ],
+
+  "performance": {
+    "winner": "YES",
+    "pnl": 4.80,
+    "roi": 92.3,
+    "won": true
+  },
+
+  "counterfactuals": {
+    "lotto": { "missedLotto": false, "yesLottoAvailable": true },
+    "dipScalp": { "missedDip": true, "yesDipScalpable": true },
+    "volatilityProfile": { "average": 0.08, "max": 0.15 }
+  }
+}
+```
+
+### Aggregate Statistics
+
+The recorder also maintains running statistics:
+
+```json
+{
+  "strategies": {
+    "LOTTO": { "attempts": 150, "executions": 12, "wins": 3, "totalPnL": 45.00 },
+    "SNIPER": { "attempts": 200, "executions": 85, "wins": 52, "totalPnL": 120.00 }
+  },
+  "counterfactuals": {
+    "missedLottos": 8,
+    "missedDips": 15
+  },
+  "volatilityBuckets": {
+    "0.00-0.02": { "windows": 50, "wins": 25, "lottoHits": 0 },
+    "0.05-0.10": { "windows": 30, "wins": 20, "lottoHits": 5 }
+  }
+}
+```
+
+### Using the Data for Optimization
+
+**Example Query 1:** Find optimal lotto volatility threshold
+
+```bash
+# Find all windows where we missed a lotto that would have hit
+grep -l '"missedLotto": true' flight_data/*.json | \
+  xargs -I {} cat {} | \
+  jq '.counterfactuals.lotto.volatilityAtLottoPrice'
+```
+
+**Example Query 2:** Win rate by delta magnitude
+
+```bash
+# Analyze performance by delta size
+cat flight_data/aggregate_stats.json | jq '.deltaRanges'
+```
+
+### Monitoring Commands
+
+```bash
+# View latest episode
+ls -t flight_data/*.json | head -1 | xargs cat | jq '.'
+
+# Count episodes
+ls flight_data/*.json | wc -l
+
+# View aggregate stats
+cat flight_data/aggregate_stats.json | jq '.'
+
+# Find missed opportunities
+grep -l '"missedLotto": true' flight_data/*.json | wc -l
+grep -l '"missedDip": true' flight_data/*.json | wc -l
+
+# View index
+cat flight_data/index.json | jq '.totalWindows, .totalWins, .totalPnL'
+```
