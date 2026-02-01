@@ -66,70 +66,201 @@ scripts/
 
 ### The Problem: "Giving Back the Gains"
 
-If your balance grows from $36 to $180, then back to $36:
-- Without protection: Lost 100% of profits
-- With Wealth Fortress: Keep 50-75% of profits in vault
+```
+THE TRADER'S TRAGEDY (Without Protection):
+
+   $180 ────────────────────────────╮
+    │                               │
+    │  ╭─── WIN STREAK ───╮         │
+    │  │  All profits at  │         │  CRASH
+    │  │  risk in trading │         │
+    │  ╰──────────────────╯         │
+   $36 ─────────────────────────────╯─────── Back to start!
+        Start                        End
+
+Result: 100% of profits LOST
+```
+
+```
+THE FORTRESS SOLUTION (With Protection):
+
+   $180 ────────────────────────────╮
+    │                               │
+    │  ╭─── WIN STREAK ───╮         │  CRASH
+    │  │ 50% auto-locked  │         │  (only hits
+    │  │   to VAULT       │         │   War Chest)
+    │  ╰──────────────────╯         │
+   $92 ─────────────────────────────╯─────── Protected!
+   $36 ─────────────────────────────────────
+        Start                        End
+
+Result: 39% of profits SAVED ($56 of $144)
+```
 
 ### The Solution: 3-Layer Protection
 
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                       WEALTH FORTRESS                                │
+│                  Capital Preservation System                         │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                      │
+│   TOTAL EQUITY ($180)                                               │
+│   ════════════════════════════════════════════════════════════════  │
+│                                                                      │
+│   ┌──────────────────────────┐  ┌──────────────────────────────┐   │
+│   │        THE VAULT         │  │        THE WAR CHEST         │   │
+│   │     (Locked Savings)     │  │     (Trading Capital)        │   │
+│   │                          │  │                              │   │
+│   │   ┌──────────────────┐   │  │   ┌──────────────────────┐   │   │
+│   │   │  Principal $36   │   │  │   │   FARM DESK (60%)    │   │   │
+│   │   │  (if doubled)    │   │  │   │   DEGEN DESK (25%)   │   │   │
+│   │   ├──────────────────┤   │  │   │   CLIPPER DESK (15%) │   │   │
+│   │   │  Locked Profits  │   │  │   └──────────────────────┘   │   │
+│   │   │  $36 (50% of     │   │  │                              │   │
+│   │   │   new profits)   │   │  │   Dynamic % based on tier:  │   │
+│   │   └──────────────────┘   │  │   BUILDER: 80%              │   │
+│   │                          │  │   GROWTH:  50%              │   │
+│   │   Total: $72             │  │   WEALTH:  $2.5k + 20%      │   │
+│   │   UNTOUCHABLE            │  │                              │   │
+│   │                          │  │   Current: $86.40            │   │
+│   └──────────────────────────┘  └──────────────────────────────┘   │
+│          40% Protected                    48% At Risk               │
+│                                                                      │
+│   ┌──────────────────────────────────────────────────────────────┐  │
+│   │                    THE RATCHET (HWM Lock)                     │  │
+│   │   At new all-time high: Auto-lock 50% of new profits         │  │
+│   │   High Water Mark: $180.00                                    │  │
+│   └──────────────────────────────────────────────────────────────┘  │
+│                                                                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Layer Details
+
 #### 1. THE VAULT (Locked Savings)
-Profits that trading desks **cannot touch**. Once money enters the vault:
-- It's invisible to trading logic
-- Protected from bad trades
-- Only accessible via manual override
+
+| Feature | Description |
+|---------|-------------|
+| Visibility | **INVISIBLE** to trading desks |
+| Access | Manual override only |
+| Contents | Principal (if doubled) + Locked profits |
+| Protection | Cannot be lost through trading |
 
 #### 2. THE WAR CHEST (Dynamic Trading Capital)
-The amount available for trading, calculated based on balance tier:
 
-| Phase | Balance Range | Trading % | Example |
-|-------|---------------|-----------|---------|
-| **BUILDER** | $0-$500 | 80% | $80 of $100 |
-| **GROWTH** | $500-$5,000 | 50% | $500 of $1,000 |
-| **WEALTH** | $5,000+ | $2,500 + 20% surplus | $3,500 of $10,000 |
+| Phase | Balance Range | War Chest % | Vault % | Strategy |
+|-------|---------------|-------------|---------|----------|
+| 🏗️ **BUILDER** | $0 - $500 | **80%** | 20% | Aggressive growth |
+| 🚀 **GROWTH** | $500 - $5,000 | **50%** | 50% | Balanced 50/50 |
+| 🐋 **WEALTH** | $5,000+ | **$2,500 + 20% surplus** | Rest | Conservative power |
+
+**War Chest Examples:**
+
+| Total Equity | Phase | War Chest | Vault | Bot Sees |
+|-------------|-------|-----------|-------|----------|
+| $100 | BUILDER | $80 | $20 | $80 |
+| $500 | GROWTH | $250 | $250 | $250 |
+| $1,000 | GROWTH | $500 | $500 | $500 |
+| $5,000 | WEALTH | $2,500 | $2,500 | $2,500 |
+| $10,000 | WEALTH | $3,500 | $6,500 | $3,500 |
+| $50,000 | WEALTH | $11,500 | $38,500 | $11,500 |
 
 #### 3. THE RATCHET (High Water Mark Profit Lock)
-Every time balance hits new all-time high:
-- Lock 50% of new profits into vault
-- Update high water mark
-- Never give back the gains
+
+```
+RATCHET MECHANISM:
+
+Balance hits new ATH ($180)
+         │
+         ▼
+    ╔═══════════════════════════════╗
+    ║  Calculate new profit:        ║
+    ║  $180 - $36 (previous HWM)    ║
+    ║  = $144 new profit            ║
+    ╚═══════════════════════════════╝
+         │
+         ▼
+    ╔═══════════════════════════════╗
+    ║  Lock 50% to Vault:           ║
+    ║  $144 × 0.50 = $72            ║
+    ║  → Vault now has $72          ║
+    ╚═══════════════════════════════╝
+         │
+         ▼
+    ╔═══════════════════════════════╗
+    ║  Update High Water Mark:      ║
+    ║  HWM = $180                   ║
+    ╚═══════════════════════════════╝
+```
 
 ### Principal Shield
 
-Once you double your initial investment ($36 → $72):
-- Original $36 is **locked forever**
-- You're now playing with "house money"
-- Cannot lose your starting capital
+| Milestone | Action | Result |
+|-----------|--------|--------|
+| Balance ≥ 2× Initial | Lock initial investment | Original capital SAFE FOREVER |
+| $36 → $72+ | Auto-lock $36 | Playing with "house money" |
 
-### Integration
+```
+PRINCIPAL SHIELD ACTIVATION:
 
-```javascript
-// Every trading loop:
-wealthFortress.sync(realBalance);
+Before:  $36 initial → at risk
+         ├────────────────────┤
 
-// Trading desks only see:
-const tradeableBalance = wealthFortress.getTradeableBalance();
-// NOT the total equity!
+After doubling ($72+):
+         ├───────┬────────────┤
+         │ $36   │  Profits   │
+         │LOCKED │  (trade)   │
+         └───────┴────────────┘
+
+Result: Cannot lose original investment!
 ```
 
-### Example Scenario
+### Complete Flow Diagram
 
-**Start:** $36 balance
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    CAPITAL FLOW THROUGH SYSTEM                       │
+└─────────────────────────────────────────────────────────────────────┘
 
-1. **Win streak → $180**
-   - New profit: $144
-   - Lock 50%: $72 → Vault
-   - War Chest: $108 × 80% = $86.40
-   - Trading sees: $86.40 (not $180!)
-
-2. **Lose streak (5 losses)**
-   - War Chest drops: $86.40 → $20
-   - Vault untouched: $72
-
-3. **End state:**
-   - Total equity: $92 ($72 vault + $20 active)
-   - **Saved:** $56 of original $144 profit
-
-Without Wealth Fortress: Would have lost all $144 profit.
+   REAL BALANCE (Polymarket API)
+         │
+         ▼
+   ┌─────────────────┐
+   │ WEALTH FORTRESS │
+   │     sync()      │
+   └────────┬────────┘
+            │
+    ┌───────┴───────┐
+    │               │
+    ▼               ▼
+┌────────┐    ┌──────────┐
+│ VAULT  │    │WAR CHEST │
+│(locked)│    │(tradeable│
+└────────┘    └────┬─────┘
+                   │
+         ┌─────────┼─────────┐
+         │         │         │
+         ▼         ▼         ▼
+    ┌────────┐ ┌────────┐ ┌────────┐
+    │  FARM  │ │ DEGEN  │ │CLIPPER │
+    │  60%   │ │  25%   │ │  15%   │
+    └────────┘ └────────┘ └────────┘
+         │         │         │
+         └─────────┴─────────┘
+                   │
+                   ▼
+            ┌─────────────┐
+            │  EXECUTION  │
+            │    DESK     │
+            └─────────────┘
+                   │
+                   ▼
+            ┌─────────────┐
+            │  POLYMARKET │
+            │   ORDERS    │
+            └─────────────┘
+```
 
 ### Configuration
 
@@ -157,6 +288,22 @@ WEALTH:  { baseWarChest: 2500, surplusRatio: 0.20 }
   "principal": "✅ SECURED",
   "highWaterMark": "$180.00"
 }
+```
+
+### Monitoring Commands
+
+```bash
+# View Wealth Fortress status
+grep WEALTH_FORTRESS bot.log | tail -10
+
+# Check profit locks
+grep PROFIT_LOCKED bot.log | tail -5
+
+# Check principal shield
+grep PRINCIPAL_SHIELD bot.log
+
+# View phase changes
+grep WEALTH_PHASE_CHANGE bot.log
 ```
 
 ## The 5 Trading Strategies
@@ -511,5 +658,19 @@ All logs are JSON for easy parsing:
 
 ## Version History
 
-- v2.0: Fair value system, 5 strategies, auto-redemption, treasury desk
-- v1.x: Basic momentum trading (deprecated)
+| Version | Date | Changes |
+|---------|------|---------|
+| **v2.1** | 2026-01-31 | Wealth Fortress profit protection, tiered allocation, principal shield |
+| v2.0 | 2026-01-30 | Fair value system, 5 strategies, auto-redemption, treasury desk |
+| v1.x | Legacy | Basic momentum trading (deprecated)
+
+### v2.1 Changelog (Wealth Fortress)
+
+- **NEW:** `wealth-fortress.js` - Capital preservation system
+- **NEW:** Vault/War Chest split (dynamic based on balance tier)
+- **NEW:** Principal Shield (lock original investment when doubled)
+- **NEW:** Ratchet system (auto-lock 50% of profits at new ATH)
+- **NEW:** Phase-based risk curve (BUILDER → GROWTH → WEALTH)
+- **CHANGED:** Trading desks now see War Chest, not total equity
+- **CHANGED:** Balance sync triggers Wealth Fortress protection
+- **ADDED:** Wealth Fortress status in STATUS logs

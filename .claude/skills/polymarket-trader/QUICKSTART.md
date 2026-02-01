@@ -8,12 +8,26 @@ This is a professional-grade autonomous trading bot for Polymarket's 15-minute B
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    ASYMMETRIC EDGE BOT                          │
+│                 ASYMMETRIC EDGE BOT v2.1                        │
+│            "Set and Forget" with Profit Protection              │
 ├─────────────────────────────────────────────────────────────────┤
-│  ORACLE DESK          Real-time Binance price stream            │
-│  CLIPPER DESK         5 trading strategies                      │
-│  EXECUTION DESK       Order placement + auto-flip               │
-│  TREASURY DESK        Auto-redeem winnings every 5 min          │
+│                                                                  │
+│  ╔═══════════════════════════════════════════════════════════╗  │
+│  ║              WEALTH FORTRESS (Profit Protection)           ║  │
+│  ║  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐║  │
+│  ║  │   VAULT     │  │ WAR CHEST   │  │      RATCHET        │║  │
+│  ║  │  (Locked)   │  │ (Tradeable) │  │  (Auto-lock at HWM) │║  │
+│  ║  └─────────────┘  └─────────────┘  └─────────────────────┘║  │
+│  ╚═══════════════════════════════════════════════════════════╝  │
+│                              │                                   │
+│                              ▼                                   │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │  ORACLE DESK       Real-time Binance price stream           ││
+│  │  CLIPPER DESK      5 trading strategies                     ││
+│  │  EXECUTION DESK    Order placement + auto-flip              ││
+│  │  TREASURY DESK     Auto-redeem winnings every 5 min         ││
+│  └─────────────────────────────────────────────────────────────┘│
+│                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -78,6 +92,7 @@ pkill -f asymmetric-edge-bot
 | File | Purpose |
 |------|---------|
 | `asymmetric-edge-bot.js` | Main orchestrator |
+| `wealth-fortress.js` | **NEW:** Profit protection & capital preservation |
 | `oracle-desk.js` | Real-time Binance WebSocket |
 | `binance-oracle.js` | REST API + market discovery |
 | `clipper-desk-manager.js` | All 5 trading strategies |
@@ -114,7 +129,42 @@ DIP_BUY_PRICE = 0.47;      // Buy dips at 47 cents
 
 **NEW IN v2.1:** Prevents "giving back the gains" with automatic profit locking.
 
+### Why This Matters
+
+```
+WITHOUT FORTRESS:                    WITH FORTRESS:
+
+$180 ───╮                           $180 ───╮
+        │ WIN                               │ WIN
+        │ STREAK                            │ STREAK (50% locked)
+        │                                   │
+        │ CRASH                            $92 ───── PROTECTED!
+        │                                   │
+$36 ────╯ Back to start              $36 ──╯
+
+Lost: 100% of profits               Saved: 39% of profits
+```
+
 ### The 3-Layer System
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    YOUR TOTAL BALANCE                        │
+├────────────────────────┬────────────────────────────────────┤
+│        VAULT           │           WAR CHEST                │
+│     (Protected)        │          (Tradeable)               │
+│                        │                                    │
+│  ┌──────────────────┐  │  ┌────────────────────────────┐   │
+│  │ Principal Shield │  │  │  FARM DESK      (60%)      │   │
+│  │ (if 2x reached)  │  │  │  DEGEN DESK     (25%)      │   │
+│  │                  │  │  │  CLIPPER DESK   (15%)      │   │
+│  │ Locked Profits   │  │  └────────────────────────────┘   │
+│  │ (50% of new ATH) │  │                                    │
+│  └──────────────────┘  │  Bot only sees this amount!       │
+│                        │                                    │
+│   CANNOT BE TRADED     │   USED FOR TRADING                │
+└────────────────────────┴────────────────────────────────────┘
+```
 
 | Layer | Purpose | How It Works |
 |-------|---------|--------------|
@@ -122,34 +172,75 @@ DIP_BUY_PRICE = 0.47;      // Buy dips at 47 cents
 | **WAR CHEST** | Trading capital | Dynamic % based on balance tier |
 | **RATCHET** | Auto-lock profits | 50% of new highs go to vault |
 
-### Balance Tiers
+### Balance Tiers (Dynamic Risk Curve)
 
-| Phase | Balance | Trading % | Example |
-|-------|---------|-----------|---------|
-| BUILDER | $0-$500 | 80% | $80 tradeable of $100 |
-| GROWTH | $500-$5k | 50% | $500 tradeable of $1k |
-| WEALTH | $5k+ | $2.5k + 20% | $3.5k tradeable of $10k |
+| Phase | Balance Range | War Chest | Vault | Strategy |
+|-------|---------------|-----------|-------|----------|
+| 🏗️ **BUILDER** | $0 - $500 | **80%** | 20% | Aggressive growth |
+| 🚀 **GROWTH** | $500 - $5k | **50%** | 50% | Balanced 50/50 |
+| 🐋 **WEALTH** | $5k+ | **$2.5k + 20%** | Rest | Conservative power |
+
+**Examples at Each Tier:**
+
+| Your Balance | Phase | War Chest (Trades) | Vault (Safe) |
+|--------------|-------|-------------------|--------------|
+| $100 | BUILDER | $80 | $20 |
+| $500 | GROWTH | $250 | $250 |
+| $2,000 | GROWTH | $1,000 | $1,000 |
+| $10,000 | WEALTH | $3,500 | $6,500 |
 
 ### Principal Shield
 
-Once you **double your money** ($36 → $72+):
-- Original $36 is **locked forever**
-- You're now trading with "house money"
-- Cannot lose your starting capital
+```
+BEFORE DOUBLING:           AFTER DOUBLING ($72+):
 
-### Example Protection
+├────────────────┤         ├───────┬────────────┤
+│  $36 at risk   │    →    │ $36   │  Profits   │
+│                │         │LOCKED │  (trade)   │
+└────────────────┘         └───────┴────────────┘
 
-**Scenario:** $36 → $180 (wins) → losses
+                           Original $36 = SAFE FOREVER
+                           Trading with "house money"
+```
 
-| Without Fortress | With Fortress |
-|------------------|---------------|
-| Back to $36 | Keep $92 |
-| Lost 100% profit | Saved 39% |
+### Example Protection Scenario
+
+**Starting balance:** $36
+
+| Step | What Happens | Total | Vault | War Chest | Bot Sees |
+|------|-------------|-------|-------|-----------|----------|
+| 1 | Start | $36 | $0 | $28.80 | $28.80 |
+| 2 | Win streak → $180 | $180 | $72 | $86.40 | $86.40 |
+| 3 | 5 losing trades | $92 | $72 | $20 | $20 |
+| 4 | **End result** | **$92** | **$72** | **$20** | **$20** |
+
+**Saved: $56 of original $144 profit (39%)**
 
 ### Monitor Status
 
 ```bash
+# View Wealth Fortress status
 grep WEALTH_FORTRESS bot.log | tail -5
+
+# Check if principal is secured
+grep PRINCIPAL_SHIELD bot.log
+
+# View profit locks at new ATHs
+grep PROFIT_LOCKED bot.log
+```
+
+### Log Output Example
+
+```json
+{
+  "action": "WEALTH_FORTRESS_SYNC",
+  "phase": "🏗️ BUILDER",
+  "totalEquity": "$180.00",
+  "vault": "$72.00 (40% protected)",
+  "warChest": "$86.40 (48% at risk)",
+  "principal": "✅ SECURED",
+  "highWaterMark": "$180.00"
+}
 ```
 
 ## Autonomous Features
@@ -220,11 +311,16 @@ Key fields:
 
 ## Safety Features
 
-1. **No $0.99 bids** - Uses fair value calculation
-2. **Price cap at $0.85** - Won't overpay
-3. **3% edge minimum** - Skips marginal trades
-4. **Emergency brake** - Halts on crashes
-5. **Auto-redemption** - Cash always available
+| # | Feature | Protection |
+|---|---------|------------|
+| 1 | **No $0.99 bids** | Uses fair value calculation |
+| 2 | **Price cap at $0.85** | Won't overpay for low edge |
+| 3 | **3% edge minimum** | Skips marginal trades |
+| 4 | **Emergency brake** | Halts on ±0.40% crashes |
+| 5 | **Auto-redemption** | Cash always available |
+| 6 | **Wealth Fortress** | Protects profits in vault |
+| 7 | **Principal Shield** | Locks original investment when doubled |
+| 8 | **Tiered allocation** | Reduces risk as balance grows |
 
 ## Updating Balance
 
@@ -243,4 +339,33 @@ See `DEPLOYMENT.md` for full technical documentation.
 
 ---
 
-**Remember**: This is real money. The bot is designed to be conservative (skip bad trades) rather than aggressive (take every opportunity). Monitor the first few hours closely.
+## Quick Reference Card
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   BOT STATUS CHEAT SHEET                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  START:    nohup node asymmetric-edge-bot.js > bot.log 2>&1 &   │
+│  STOP:     pkill -f asymmetric-edge-bot                         │
+│  LOGS:     tail -f bot.log                                      │
+│                                                                  │
+│  CHECK FORTRESS:  grep WEALTH_FORTRESS bot.log | tail -3        │
+│  CHECK TRADES:    grep SUCCESS bot.log | tail -10               │
+│  CHECK ERRORS:    grep ERROR bot.log | tail -5                  │
+│                                                                  │
+├─────────────────────────────────────────────────────────────────┤
+│  PROTECTION TIERS:                                               │
+│  ├── BUILDER ($0-$500):   80% tradeable, 20% protected          │
+│  ├── GROWTH ($500-$5k):   50% tradeable, 50% protected          │
+│  └── WEALTH ($5k+):       $2.5k + 20% surplus tradeable         │
+│                                                                  │
+│  PRINCIPAL SHIELD: Activated when balance ≥ 2× initial          │
+│  RATCHET: Auto-locks 50% of profits at new ATH                  │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+**Remember**: This is real money. The bot is designed to be conservative (skip bad trades) rather than aggressive (take every opportunity). The Wealth Fortress protects your profits automatically, but monitor the first few hours closely.
