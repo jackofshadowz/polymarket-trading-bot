@@ -21,7 +21,7 @@ const STATE_FILE = path.join(__dirname, 'wealth-fortress-state.json');
 class WealthFortress {
   constructor() {
     // CONFIGURATION
-    this.INITIAL_PRINCIPAL = 36.00;  // Original investment to protect
+    this.INITIAL_PRINCIPAL = 74.00;  // Original investment to protect
     this.PROFIT_SKIM_RATIO = 0.50;   // Lock 50% of new profits at HWM
 
     // TIERED ALLOCATION (Dynamic risk curve)
@@ -111,6 +111,41 @@ class WealthFortress {
       fs.writeFileSync(STATE_FILE, JSON.stringify(this.state, null, 2));
     } catch (error) {
       console.warn('Wealth Fortress: Could not save state:', error.message);
+    }
+  }
+
+  // ============================================================
+  // FIX #4: PRINCIPAL VALIDATION
+  // Validates that INITIAL_PRINCIPAL matches actual starting balance
+  // ============================================================
+
+  validatePrincipal(actualBalance) {
+    // If first run (state was just created), initialize from actual balance
+    if (this.state.totalEquity === 0 && actualBalance > 0) {
+      console.log(JSON.stringify({
+        action: 'WEALTH_FORTRESS_INIT',
+        actualBalance: actualBalance.toFixed(2),
+        storedPrincipal: this.INITIAL_PRINCIPAL.toFixed(2),
+        timestamp: new Date().toISOString()
+      }));
+
+      // Use actual balance as the principal reference if no state exists
+      if (!this.state.highWaterMark || this.state.highWaterMark === this.INITIAL_PRINCIPAL) {
+        this.state.highWaterMark = actualBalance;
+      }
+    }
+
+    // Warn if mismatch > 10%
+    const diff = Math.abs(actualBalance - this.INITIAL_PRINCIPAL) / this.INITIAL_PRINCIPAL;
+    if (diff > 0.10 && actualBalance > 0) {
+      console.warn(JSON.stringify({
+        action: 'PRINCIPAL_MISMATCH_WARNING',
+        stored: this.INITIAL_PRINCIPAL.toFixed(2),
+        actual: actualBalance.toFixed(2),
+        diffPct: (diff * 100).toFixed(1) + '%',
+        recommendation: 'Consider updating INITIAL_PRINCIPAL to match actual balance',
+        timestamp: new Date().toISOString()
+      }));
     }
   }
 
@@ -211,6 +246,59 @@ class WealthFortress {
 
     // Floor at zero
     this.state.warChest = Math.max(0, this.state.warChest);
+
+    // ============================================================
+    // FIX #9: VAULT DRAWDOWN PROTECTION
+    // If war chest drops >15% from high water mark, release 5% of vault
+    // This prevents the bot from being unable to trade after losses
+    // ============================================================
+    const DRAWDOWN_THRESHOLD = 0.15;  // 15% max drawdown
+    if (this.state.highWaterMark > 0 && this.state.vaultBalance > 0) {
+      const warChestDrawdown = (this.state.highWaterMark - this.state.warChest) / this.state.highWaterMark;
+
+      if (warChestDrawdown > DRAWDOWN_THRESHOLD) {
+        // Emergency release 5% of vault to maintain trading ability
+        const releaseAmount = Math.min(
+          this.state.vaultBalance * 0.05,
+          this.state.vaultBalance  // Can't release more than vault has
+        );
+
+        if (releaseAmount >= 0.50) {  // Only release if >= $0.50
+          console.log(JSON.stringify({
+            action: 'DRAWDOWN_EMERGENCY_RELEASE',
+            drawdownPct: (warChestDrawdown * 100).toFixed(1) + '%',
+            releaseAmount: releaseAmount.toFixed(2),
+            vaultBefore: this.state.vaultBalance.toFixed(2),
+            warChestBefore: this.state.warChest.toFixed(2),
+            reason: 'Maintaining minimum trading capital',
+            timestamp: new Date().toISOString()
+          }));
+
+          this.state.vaultBalance -= releaseAmount;
+          this.state.warChest += releaseAmount;
+
+          this.state.lockEvents.push({
+            type: 'DRAWDOWN_RELEASE',
+            amount: -releaseAmount,
+            drawdownPct: warChestDrawdown,
+            balance: this.state.totalEquity,
+            timestamp: new Date().toISOString()
+          });
+        }
+      }
+    }
+
+    // Prevent impossible state: vault > equity
+    if (this.state.vaultBalance > this.state.totalEquity) {
+      console.error(JSON.stringify({
+        action: 'VAULT_OVERFLOW_CORRECTION',
+        vault: this.state.vaultBalance.toFixed(2),
+        equity: this.state.totalEquity.toFixed(2),
+        correction: 'Capping vault at 50% of equity',
+        timestamp: new Date().toISOString()
+      }));
+      this.state.vaultBalance = this.state.totalEquity * 0.50;
+    }
 
     // Save state periodically
     this.saveState();

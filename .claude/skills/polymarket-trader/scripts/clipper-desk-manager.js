@@ -7,6 +7,50 @@ const virtualAccounts = require('./virtual-account-manager');
 const blackBoxRecorder = require('./black-box-recorder');
 
 // ============================================================
+// LOG OBFUSCATION - Fix #15: Mask sensitive data in logs
+// ============================================================
+
+/**
+ * Mask sensitive identifiers for secure logging
+ * Shows first 6 and last 4 characters only
+ * @param {string} id - Token ID or address to mask
+ * @returns {string} Masked identifier
+ */
+function maskId(id) {
+  if (!id || typeof id !== 'string') return id;
+  if (id.length <= 10) return id;
+  return `${id.substring(0, 6)}...${id.substring(id.length - 4)}`;
+}
+
+// ============================================================
+// FIX #6: MARKET FRESHNESS VALIDATION
+// Ensures we don't trade on stale market data
+// ============================================================
+
+/**
+ * Validate market data freshness before trading decisions
+ * @param {Object} market - Market data with optional fetchedAt timestamp
+ * @param {number} maxAgeMs - Maximum allowed age in milliseconds (default 3s)
+ * @returns {boolean} True if market data is fresh enough
+ */
+function validateMarketFreshness(market, maxAgeMs = 3000) {
+  if (!market) return false;
+  if (!market.fetchedAt) return true;  // Allow if no timestamp (legacy)
+
+  const age = Date.now() - market.fetchedAt;
+  if (age > maxAgeMs) {
+    console.log(JSON.stringify({
+      action: 'MARKET_STALE_REJECT',
+      ageMs: age,
+      maxAgeMs: maxAgeMs,
+      timestamp: new Date().toISOString()
+    }));
+    return false;
+  }
+  return true;
+}
+
+// ============================================================
 // FAIR VALUE CALCULATION - The heart of profitable trading
 // ============================================================
 
@@ -136,6 +180,169 @@ const LOTTO_TIME_WINDOW_END = 30;     // Stop at 30 seconds (need time to fill)
 let lottoTicketsPurchased = {}; // { windowSlug: { side, entryPrice, shares } }
 
 // ============================================================
+// DYNAMIC SLIPPAGE CALCULATOR
+// Adjust slippage based on recent price volatility
+// ============================================================
+
+/**
+ * Calculate dynamic slippage based on recent price volatility
+ * Higher volatility = more slippage tolerance needed
+ *
+ * @param {Array} priceHistory - Array of { price, timestamp } objects
+ * @param {number} baseSlippage - Default slippage (0.05 = 5 cents)
+ * @returns {number} Adjusted slippage value
+ */
+function calculateDynamicSlippage(priceHistory, baseSlippage = 0.05) {
+  if (!priceHistory || priceHistory.length < 5) {
+    return baseSlippage;
+  }
+
+  // Get last 10 price points
+  const recent = priceHistory.slice(-10);
+  const prices = recent.map(p => typeof p === 'number' ? p : p.price);
+
+  // Calculate range (high - low)
+  const high = Math.max(...prices);
+  const low = Math.min(...prices);
+  const range = high - low;
+
+  // Higher volatility = more slippage tolerance
+  // Range of 0% → baseSlippage
+  // Range of 5%+ → up to 3x baseSlippage
+  const volatilityMultiplier = 1 + (range * 10); // Scale factor
+
+  // Cap at 15 cents max slippage
+  return Math.min(0.15, baseSlippage * volatilityMultiplier);
+}
+
+// ============================================================
+// TIME-WEIGHTED EDGE BUFFER
+// As time decays, require larger edge to overcome uncertainty
+// ============================================================
+
+/**
+ * Calculate the minimum required edge based on time remaining.
+ *
+ * Logic: With 12 minutes left, a 5¢ edge is significant because
+ * there's plenty of time for mean reversion. With 90 seconds left,
+ * that same 5¢ edge is noise - we need 15¢+ to overcome randomness.
+ *
+ * | Time Remaining | Min Edge | Rationale |
+ * |----------------|----------|-----------|
+ * | 15m - 10m      | 5¢       | High confidence, mean reversion likely |
+ * | 10m - 5m       | 8¢       | Momentum building, need clearer signal |
+ * | 5m - 2m        | 12¢      | High gamma risk, deep value only |
+ * | < 2m           | 20¢      | Lotto zone - only severe mispricings |
+ *
+ * @param {number} secondsLeft - Time remaining in window
+ * @returns {number} Minimum edge required (in dollars, e.g., 0.05 = 5¢)
+ */
+function getTimeWeightedEdgeRequirement(secondsLeft) {
+  // Early window (10-15 min left): Low bar, plenty of time for reversion
+  if (secondsLeft > 600) {
+    return 0.05;  // 5¢ edge
+  }
+
+  // Mid window (5-10 min left): Medium bar, momentum matters more
+  if (secondsLeft > 300) {
+    return 0.08;  // 8¢ edge
+  }
+
+  // Late window (2-5 min left): High bar, only deep value plays
+  if (secondsLeft > 120) {
+    return 0.12;  // 12¢ edge
+  }
+
+  // End game (<2 min left): Maximum bar, lotto territory only
+  return 0.20;  // 20¢ edge
+}
+
+/**
+ * Get a human-readable description of the edge requirement zone
+ * @param {number} secondsLeft - Time remaining in window
+ * @returns {string} Zone description
+ */
+function getEdgeZoneName(secondsLeft) {
+  if (secondsLeft > 600) return 'EARLY_WINDOW';
+  if (secondsLeft > 300) return 'MID_WINDOW';
+  if (secondsLeft > 120) return 'LATE_WINDOW';
+  return 'END_GAME';
+}
+
+// ============================================================
+// MEAN REVERSION EXCEPTION (Smart Lotto Tickets)
+// Allow buying against delta ONLY during flash crashes
+// ============================================================
+
+/**
+ * Evaluate if a "Mean Reversion Exception" should trigger.
+ *
+ * This allows buying YES even when BTC is red (or NO when green)
+ * BUT ONLY when there's evidence of a flash crash/spike that
+ * will likely snap back.
+ *
+ * Requirements (ALL must be true):
+ * 1. Delta Divergence: BTC has dropped/spiked >0.15% quickly
+ * 2. Deep Discount: Market price ≤25¢ (huge asymmetric payoff)
+ * 3. Time Buffer: >60 seconds left (time for reversion)
+ *
+ * @param {Object} market - Market data { yesPrice, noPrice, secondsLeft }
+ * @param {Object} oracleTrend - Binance data { deltaPct }
+ * @param {number} recentVelocity - Price change velocity (optional)
+ * @returns {Object} { triggered, side, reason }
+ */
+function evaluateMeanReversionException(market, oracleTrend, recentVelocity = 0) {
+  const deltaPct = oracleTrend?.deltaPct || 0;
+
+  // Guard: Need enough time for reversion
+  if (market.secondsLeft < 60) {
+    return { triggered: false, side: null, reason: 'Too close to expiry for mean reversion play' };
+  }
+
+  // Guard: Need enough time but not too early (wait for crash to develop)
+  if (market.secondsLeft > 600) {
+    return { triggered: false, side: null, reason: 'Too early - wait for crash to develop' };
+  }
+
+  const CRASH_THRESHOLD = 0.15;   // 0.15% move = flash crash
+  const DEEP_DISCOUNT = 0.25;     // Only buy at 25¢ or less
+
+  // SCENARIO: BTC is RED but YES is deeply discounted
+  // This is a "buy the dip" play - betting BTC will recover
+  if (deltaPct <= -CRASH_THRESHOLD && market.yesPrice <= DEEP_DISCOUNT) {
+    // Extra validation: The velocity should show we're near the bottom
+    // (optional - if velocity is provided, we use it)
+    const velocityOk = recentVelocity >= -0.05; // Not still falling hard
+
+    return {
+      triggered: true,
+      side: 'YES',
+      reason: `MEAN_REVERSION: BTC crashed ${(deltaPct * 100).toFixed(2)}% but YES at ${(market.yesPrice * 100).toFixed(0)}¢ is extreme discount`,
+      deltaPct: deltaPct,
+      discount: market.yesPrice,
+      velocityOk: velocityOk
+    };
+  }
+
+  // SCENARIO: BTC is GREEN but NO is deeply discounted
+  // This is a "fade the spike" play - betting BTC will pull back
+  if (deltaPct >= CRASH_THRESHOLD && market.noPrice <= DEEP_DISCOUNT) {
+    const velocityOk = recentVelocity <= 0.05; // Not still spiking hard
+
+    return {
+      triggered: true,
+      side: 'NO',
+      reason: `MEAN_REVERSION: BTC spiked +${(deltaPct * 100).toFixed(2)}% but NO at ${(market.noPrice * 100).toFixed(0)}¢ is extreme discount`,
+      deltaPct: deltaPct,
+      discount: market.noPrice,
+      velocityOk: velocityOk
+    };
+  }
+
+  return { triggered: false, side: null, reason: 'No mean reversion opportunity' };
+}
+
+// ============================================================
 // OPENER STRATEGY - Pre-bid on next window based on momentum
 // ============================================================
 
@@ -223,14 +430,21 @@ function evaluateOpenerOpportunity(timeLeftCurrentWindow, currentWindowPriceData
  */
 async function executeOpenerBet(nextWindowSlug, nextMarket, openerDecision, placeMarketOrder) {
   try {
+    // FIX: Validate market data freshness before trading
+    if (!validateMarketFreshness(nextMarket)) {
+      return false;
+    }
+
     const clipperBalance = virtualAccounts.getDeskBalance('CLIPPER');
 
     // Opener bets are smaller (5-8% of balance) - it's a "feeler" position
     const betSizePercent = openerDecision.confidence === 'HIGH' ? 0.08 : 0.05;
     const desiredBetSize = clipperBalance * betSizePercent;
 
-    // Minimum 5 shares at ~50 cents = ~$2.50 minimum
-    const minBetSize = 5 * openerDecision.maxPrice;
+    // Minimum 5.1 shares with buffer for price movement
+    // Add 15% buffer to maxPrice to ensure we can fill even if price moves
+    const executionPriceBuffer = openerDecision.maxPrice * 1.15;
+    const minBetSize = 5.1 * executionPriceBuffer;
     const betSize = Math.max(minBetSize, desiredBetSize);
 
     if (clipperBalance < minBetSize) {
@@ -441,6 +655,26 @@ function assessMarketVibes(marketData) {
  */
 async function executeClipperStraddle(windowSlug, market, placeMarketOrder, windowPriceData, timeLeftSeconds = 300) {
   try {
+    // FIX: Validate market data freshness before trading
+    if (!validateMarketFreshness(market)) {
+      return { success: false, reason: 'STALE_MARKET_DATA' };
+    }
+
+    // GLOBAL CAP CHECK: Respect Wealth Fortress limits across ALL desks
+    const globalCap = virtualAccounts.getPerWindowRiskCap();
+    const currentExposure = virtualAccounts.getTotalWindowExposure();
+
+    if (currentExposure >= globalCap) {
+      console.log(JSON.stringify({
+        action: 'CLIPPER_BLOCKED_GLOBAL_CAP',
+        currentExposure: currentExposure.toFixed(2),
+        globalCap: globalCap.toFixed(2),
+        reason: 'Global per-window cap reached - Wealth Fortress protection',
+        timestamp: new Date().toISOString()
+      }));
+      return { success: false, reason: 'GLOBAL_CAP_REACHED' };
+    }
+
     const clipperBalance = virtualAccounts.getDeskBalance('CLIPPER');
 
     // Check if balance sufficient (min $3 to have any chance at 5 shares)
@@ -685,6 +919,27 @@ async function executeClipperStraddle(windowSlug, market, placeMarketOrder, wind
  */
 async function executeClip(desk, position, clipPercentage, reason, market, placeMarketOrder) {
   try {
+    // FIX: Validate market data freshness before trading
+    if (!validateMarketFreshness(market, 5000)) {  // 5s tolerance for clips (time-sensitive)
+      return false;
+    }
+
+    // FIX: Check global spending cap before clip (prevents CLIPPER cap bypass)
+    const globalCap = virtualAccounts.getPerWindowRiskCap();
+    const currentExposure = virtualAccounts.getTotalWindowExposure();
+
+    if (currentExposure >= globalCap) {
+      console.log(JSON.stringify({
+        action: 'CLIP_BLOCKED_GLOBAL_CAP',
+        desk: desk,
+        currentExposure: currentExposure.toFixed(2),
+        globalCap: globalCap.toFixed(2),
+        reason: 'Global per-window cap reached',
+        timestamp: new Date().toISOString()
+      }));
+      return false;
+    }
+
     const sharesToClip = position.shares * clipPercentage;
     const oppositeSide = position.side === 'YES' ? 'NO' : 'YES';
     const oppositeTokenId = oppositeSide === 'YES' ? market.yesTokenId : market.noTokenId;
@@ -704,11 +959,28 @@ async function executeClip(desk, position, clipPercentage, reason, market, place
     }));
 
     // Sell by buying opposite side
-    const betSize = sharesToClip * oppositePrice;
+    // Add dynamic slippage based on market conditions
+    // Uses calculateDynamicSlippage for volatile markets, with 8¢ base
+    const priceHistory = market.priceHistory || null;
+    const clipSlippage = calculateDynamicSlippage(priceHistory, 0.08);
+    const fillPrice = Math.min(0.85, oppositePrice + clipSlippage);  // Cap at 85¢
+    const betSize = sharesToClip * fillPrice;  // Calculate cost at fill price
+
+    console.log(JSON.stringify({
+      action: 'CLIP_ORDER_DETAILS',
+      marketPrice: oppositePrice.toFixed(3),
+      fillPrice: fillPrice.toFixed(3),
+      slippage: clipSlippage.toFixed(3),
+      slippageType: priceHistory ? 'DYNAMIC' : 'BASE',
+      betSize: betSize.toFixed(2),
+      sharesToClip: sharesToClip.toFixed(2),
+      timestamp: new Date().toISOString()
+    }));
+
     const sellResult = await placeMarketOrder(market, {
       side: oppositeSide,
       tokenId: oppositeTokenId,
-      price: oppositePrice,
+      price: fillPrice,  // Use fill price with slippage, not market price
       betSize: betSize,
       desk: desk
     }, betSize);
@@ -720,11 +992,36 @@ async function executeClip(desk, position, clipPercentage, reason, market, place
         // Full clip - remove position
         virtualAccounts.settlePosition(desk, position.windowSlug, position.side);
       } else {
-        // Partial clip - reduce shares
-        const updatedPosition = position;
-        updatedPosition.shares *= (1 - clipPercentage);
-        updatedPosition.costBasis *= (1 - clipPercentage);
-        virtualAccounts.saveAccounts();
+        // FIX #10: Atomic partial clip with proper field updates
+        const remainingRatio = 1 - clipPercentage;
+        const updatedShares = position.shares * remainingRatio;
+        const updatedCostBasis = position.costBasis * remainingRatio;
+        const updatedCurrentValue = (position.currentValue || position.costBasis) * remainingRatio;
+
+        // Validate new values - if too small, force full clip
+        if (updatedShares < 1 || updatedCostBasis <= 0) {
+          console.log(JSON.stringify({
+            action: 'PARTIAL_CLIP_FORCED_FULL',
+            reason: 'Remaining shares too small',
+            remainingShares: updatedShares.toFixed(2),
+            timestamp: new Date().toISOString()
+          }));
+          virtualAccounts.settlePosition(desk, position.windowSlug, position.side);
+        } else {
+          // Update all position fields atomically
+          position.shares = updatedShares;
+          position.costBasis = updatedCostBasis;
+          position.currentValue = updatedCurrentValue;
+          position.unrealizedPL = updatedCurrentValue - updatedCostBasis;
+          position.lastClipAt = new Date().toISOString();
+          position.clipHistory = position.clipHistory || [];
+          position.clipHistory.push({
+            clipPct: clipPercentage,
+            timestamp: new Date().toISOString()
+          });
+
+          virtualAccounts.saveAccounts();
+        }
       }
 
       // Record clip stats
@@ -886,6 +1183,17 @@ function getClippablePositions(clipperPositions, market) {
  * @returns {Object|null} { action, side, price, rationale } or null
  */
 function evaluateDipOpportunity(market, binanceData, windowSlug, timeLeft) {
+  // FRESHNESS CHECK: Reject stale market data (>5 seconds old)
+  if (market.fetchedAt && (Date.now() - market.fetchedAt > 5000)) {
+    console.log(JSON.stringify({
+      action: 'DIP_STALE_MARKET_DATA',
+      ageMs: Date.now() - market.fetchedAt,
+      maxAgeMs: 5000,
+      timestamp: new Date().toISOString()
+    }));
+    return null;
+  }
+
   // Don't fish for dips in last 2 minutes (not enough time to flip)
   if (timeLeft < 120) {
     blackBoxRecorder.logDecision('DIP_CHECK', 'SKIPPED', 'Not enough time for dip flip', {
@@ -979,6 +1287,26 @@ function evaluateDipOpportunity(market, binanceData, windowSlug, timeLeft) {
  */
 async function executeDipBuy(windowSlug, market, dipDecision, placeMarketOrder) {
   try {
+    // FIX: Validate market data freshness before trading
+    if (!validateMarketFreshness(market)) {
+      return { success: false, reason: 'STALE_MARKET_DATA' };
+    }
+
+    // GLOBAL CAP CHECK: Respect Wealth Fortress limits across ALL desks
+    const globalCap = virtualAccounts.getPerWindowRiskCap();
+    const currentExposure = virtualAccounts.getTotalWindowExposure();
+
+    if (currentExposure >= globalCap) {
+      console.log(JSON.stringify({
+        action: 'DIP_BLOCKED_GLOBAL_CAP',
+        currentExposure: currentExposure.toFixed(2),
+        globalCap: globalCap.toFixed(2),
+        reason: 'Global per-window cap reached - Wealth Fortress protection',
+        timestamp: new Date().toISOString()
+      }));
+      return { success: false, reason: 'GLOBAL_CAP_REACHED' };
+    }
+
     const clipperBalance = virtualAccounts.getDeskBalance('CLIPPER');
 
     // Dip buys are larger (8-12% of balance) - higher conviction
@@ -1082,6 +1410,16 @@ async function executeDipBuy(windowSlug, market, dipDecision, placeMarketOrder) 
  * @returns {Object|null} { action, position, price, reason } or null
  */
 function checkDipAutoFlip(market, windowSlug, timeLeft, binanceData) {
+  // FRESHNESS CHECK: Don't act on stale market data
+  if (market.fetchedAt && (Date.now() - market.fetchedAt > 5000)) {
+    console.log(JSON.stringify({
+      action: 'DIP_FLIP_STALE_DATA',
+      ageMs: Date.now() - market.fetchedAt,
+      timestamp: new Date().toISOString()
+    }));
+    return null;
+  }
+
   const dipPosition = activeDipOrders[windowSlug];
   if (!dipPosition || dipPosition.status !== 'HOLDING') {
     return null;
@@ -1284,6 +1622,26 @@ function scanForLottoTickets(market, volatility, windowSlug, timeLeft) {
  */
 async function executeLottoBuy(windowSlug, market, lottoOpportunity, placeMarketOrder) {
   try {
+    // FIX: Validate market data freshness before trading
+    if (!validateMarketFreshness(market)) {
+      return { success: false, reason: 'STALE_MARKET_DATA' };
+    }
+
+    // GLOBAL CAP CHECK: Respect Wealth Fortress limits across ALL desks
+    const globalCap = virtualAccounts.getPerWindowRiskCap();
+    const currentExposure = virtualAccounts.getTotalWindowExposure();
+
+    if (currentExposure >= globalCap) {
+      console.log(JSON.stringify({
+        action: 'LOTTO_BLOCKED_GLOBAL_CAP',
+        currentExposure: currentExposure.toFixed(2),
+        globalCap: globalCap.toFixed(2),
+        reason: 'Global per-window cap reached - Wealth Fortress protection',
+        timestamp: new Date().toISOString()
+      }));
+      return { success: false, reason: 'GLOBAL_CAP_REACHED' };
+    }
+
     const clipperBalance = virtualAccounts.getDeskBalance('CLIPPER');
 
     // Lotto tickets are tiny - max $1 each
@@ -1425,6 +1783,508 @@ function checkOpenerScalps(clipperPositions, market) {
   return scalps;
 }
 
+// ============================================================
+// SEQUENTIAL SCALPING SYSTEM - Smart Stacking with Risk Control
+// ============================================================
+// Allows multiple trades per window with validation:
+// 1. Hard exposure cap ($15 max per window)
+// 2. Edge validation before stacking (no revenge trading)
+// 3. Winner's privilege (can reload after wins)
+// 4. Trailing stop on winners (ride the rocket)
+// ============================================================
+
+// Sequential Scalping State (reset per window)
+let sequentialState = {
+  windowId: null,
+  totalExposure: 0,           // Total dollars at risk in this window
+  maxExposure: 15.00,         // Max risk per window
+  activePosition: null,       // Current open position
+  positionHighWaterMark: 0,   // Track peak for trailing stop
+  realizedPnL: 0,             // P&L closed this window
+  hasLostTrade: false,        // Stop trading after a loss (Winner's Privilege)
+  tradeCount: 0               // Number of trades this window
+};
+
+/**
+ * Reset sequential state for new window
+ */
+function resetSequentialState(windowId, maxExposure = 15.00) {
+  sequentialState = {
+    windowId: windowId,
+    totalExposure: 0,
+    maxExposure: maxExposure,
+    activePosition: null,
+    positionHighWaterMark: 0,
+    realizedPnL: 0,
+    hasLostTrade: false,
+    tradeCount: 0
+  };
+
+  console.log(JSON.stringify({
+    action: 'SEQUENTIAL_STATE_RESET',
+    windowId: windowId,
+    maxExposure: maxExposure,
+    timestamp: new Date().toISOString()
+  }));
+}
+
+/**
+ * Evaluate trade opportunity with Smart Stacking logic
+ *
+ * @param {Object} market - Market data { id, yesPrice, noPrice, yesTokenId, noTokenId, secondsLeft }
+ * @param {Object} oracleTrend - Binance data { delta, deltaPct }
+ * @param {number} volatility - Recent price volatility
+ * @param {number} dynamicCap - Dynamic risk cap from War Chest (15% of War Chest)
+ * @returns {Object} { action, price, size, strategy, reason }
+ */
+function evaluateTradeOpportunity(market, oracleTrend, volatility, dynamicCap) {
+  // VALIDATION: Reject if market data is incomplete or invalid
+  if (!market || typeof market.yesPrice !== 'number' || typeof market.noPrice !== 'number') {
+    console.log(JSON.stringify({
+      action: 'TRADE_EVAL_REJECTED',
+      reason: 'Invalid market data',
+      hasMarket: !!market,
+      yesPrice: market?.yesPrice,
+      noPrice: market?.noPrice,
+      timestamp: new Date().toISOString()
+    }));
+    return { action: 'HOLD', reason: 'Invalid market data' };
+  }
+
+  if (market.yesPrice < 0 || market.yesPrice > 1 || market.noPrice < 0 || market.noPrice > 1) {
+    console.log(JSON.stringify({
+      action: 'TRADE_EVAL_REJECTED',
+      reason: 'Price out of bounds',
+      yesPrice: market.yesPrice,
+      noPrice: market.noPrice,
+      timestamp: new Date().toISOString()
+    }));
+    return { action: 'HOLD', reason: 'Price out of bounds' };
+  }
+
+  // 1. WINDOW RESET
+  if (market.id !== sequentialState.windowId) {
+    resetSequentialState(market.id, dynamicCap || 15.00);
+  }
+
+  // 2. UPDATE MAX EXPOSURE DYNAMICALLY (scales with War Chest)
+  if (dynamicCap && dynamicCap !== sequentialState.maxExposure) {
+    sequentialState.maxExposure = dynamicCap;
+  }
+
+  // 3. HARD RISK CAP - The only truly "hard" rule
+  if (sequentialState.totalExposure >= sequentialState.maxExposure) {
+    // Special Case: "The Golden Ticket"
+    // If capped out, BUT we find a 2-cent Lotto with high volatility, allow $1 override
+    if (market.secondsLeft <= 180 && market.secondsLeft > 30 && volatility > 0.10) {
+      if (market.yesPrice <= 0.025 || market.noPrice <= 0.025) {
+        console.log(JSON.stringify({
+          action: 'GOLDEN_TICKET_OVERRIDE',
+          reason: 'Risk cap hit but allowing $1 lotto ticket',
+          volatility: volatility,
+          timestamp: new Date().toISOString()
+        }));
+        // Continue to lotto logic below
+      } else {
+        return { action: 'HOLD', reason: 'Max window exposure reached ($' + sequentialState.maxExposure.toFixed(2) + ')' };
+      }
+    } else {
+      return { action: 'HOLD', reason: 'Max window exposure reached ($' + sequentialState.maxExposure.toFixed(2) + ')' };
+    }
+  }
+
+  // 3. WINNER'S PRIVILEGE - Stop after a loss
+  if (sequentialState.hasLostTrade) {
+    return { action: 'HOLD', reason: 'Window stop: took a loss, waiting for next window' };
+  }
+
+  // 4. ONE AT A TIME - Must close current position before new trade
+  if (sequentialState.activePosition) {
+    return { action: 'HOLD', reason: 'Active position open - manage before reloading' };
+  }
+
+  // =================================================================
+  // STRATEGY A: LOTTO TICKET (Chaos Play - Delta Irrelevant)
+  // =================================================================
+  if (market.secondsLeft <= 180 && market.secondsLeft > 30) {
+    if (volatility > 0.05) {
+      if (market.yesPrice <= 0.03) {
+        return {
+          action: 'BUY_YES',
+          price: market.yesPrice + 0.01,
+          size: Math.floor(1.00 / (market.yesPrice + 0.01)),
+          strategy: 'LOTTO',
+          reason: 'High volatility lotto ticket',
+          cost: 1.00
+        };
+      }
+      if (market.noPrice <= 0.03) {
+        return {
+          action: 'BUY_NO',
+          price: market.noPrice + 0.01,
+          size: Math.floor(1.00 / (market.noPrice + 0.01)),
+          strategy: 'LOTTO',
+          reason: 'High volatility lotto ticket',
+          cost: 1.00
+        };
+      }
+    }
+  }
+
+  // =================================================================
+  // STRATEGY B: DIP SCALP + DEEP VALUE HUNTER + MEAN REVERSION
+  // Now with TIME-WEIGHTED EDGE requirements
+  // =================================================================
+
+  // Calculate Fair Value based on Binance delta
+  // Flat (0%) = 50¢, +0.1% = 70¢, -0.1% = 30¢
+  const deltaPct = oracleTrend?.deltaPct || 0;
+  let fairValueYes = 0.50 + (deltaPct * 2);
+  fairValueYes = Math.max(0.05, Math.min(0.95, fairValueYes));
+  const fairValueNo = 1.0 - fairValueYes;
+
+  // TIME-WEIGHTED EDGE: As time decays, require larger edge
+  const minRequiredEdge = getTimeWeightedEdgeRequirement(market.secondsLeft);
+  const edgeZone = getEdgeZoneName(market.secondsLeft);
+
+  const DEEP_VALUE_EDGE = 0.15; // 15¢ edge for deep value (flash crash) - always same
+  const MAX_PRICE = 0.47; // Dip zone ceiling
+
+  // =================================================================
+  // STRATEGY B.0: MEAN REVERSION EXCEPTION (Smart Lotto)
+  // Allow buying AGAINST delta during flash crashes
+  // =================================================================
+  const meanReversion = evaluateMeanReversionException(market, oracleTrend);
+  if (meanReversion.triggered) {
+    const side = meanReversion.side;
+    const price = side === 'YES' ? market.yesPrice : market.noPrice;
+
+    console.log(JSON.stringify({
+      action: 'MEAN_REVERSION_TRIGGERED',
+      side: side,
+      marketPrice: (price * 100).toFixed(0) + '¢',
+      deltaPct: meanReversion.deltaPct,
+      reason: meanReversion.reason,
+      timestamp: new Date().toISOString()
+    }));
+
+    const betSize = Math.min(2.00, sequentialState.maxExposure - sequentialState.totalExposure);
+    const shares = Math.floor(betSize / (price + 0.02));
+
+    if (shares >= 5) {
+      return {
+        action: side === 'YES' ? 'BUY_YES' : 'BUY_NO',
+        price: price + 0.02, // Pay premium for urgent fill
+        size: shares,
+        strategy: 'MEAN_REVERSION',
+        reason: meanReversion.reason,
+        cost: betSize,
+        fairValue: side === 'YES' ? fairValueYes : fairValueNo
+      };
+    }
+  }
+
+  // --- CHECK YES SIDE ---
+  if (market.yesPrice <= MAX_PRICE && market.yesPrice > 0.03) {
+    const yesEdge = fairValueYes - market.yesPrice;
+
+    // SCENARIO A: DEEP VALUE (Flash Crash) - Massive edge always trumps time
+    // Price crashed but Fair Value says it's worth way more
+    if (yesEdge >= DEEP_VALUE_EDGE) {
+      console.log(JSON.stringify({
+        action: 'DEEP_VALUE_DETECTED',
+        side: 'YES',
+        marketPrice: (market.yesPrice * 100).toFixed(0) + '¢',
+        fairValue: (fairValueYes * 100).toFixed(0) + '¢',
+        edge: (yesEdge * 100).toFixed(0) + '¢',
+        edgeZone: edgeZone,
+        minRequired: (minRequiredEdge * 100).toFixed(0) + '¢',
+        timestamp: new Date().toISOString()
+      }));
+
+      const betSize = Math.min(3.50, sequentialState.maxExposure - sequentialState.totalExposure);
+      const shares = Math.floor(betSize / (market.yesPrice + 0.02));
+
+      if (shares >= 5) {
+        return {
+          action: 'BUY_YES',
+          price: market.yesPrice + 0.02, // Pay 2¢ premium for urgent fill
+          size: shares,
+          strategy: 'DEEP_VALUE',
+          reason: `DEEP VALUE: ${(yesEdge * 100).toFixed(0)}¢ edge (FV=${(fairValueYes * 100).toFixed(0)}¢ vs Mkt=${(market.yesPrice * 100).toFixed(0)}¢)`,
+          cost: betSize,
+          fairValue: fairValueYes,
+          edgeZone: edgeZone
+        };
+      }
+    }
+
+    // SCENARIO B: STANDARD DIP (Calm market) - TIME-WEIGHTED EDGE APPLIES
+    // Edge must meet the time-based minimum threshold
+    if (yesEdge >= minRequiredEdge && volatility < 0.15) {
+      // Validate: Only buy YES if BTC trend is flat or bullish
+      if (deltaPct >= -0.02) {
+        const betSize = Math.min(3.50, sequentialState.maxExposure - sequentialState.totalExposure);
+        const shares = Math.floor(betSize / (market.yesPrice + 0.01));
+
+        if (shares >= 5) {
+          return {
+            action: 'BUY_YES',
+            price: market.yesPrice + 0.01,
+            size: shares,
+            strategy: 'DIP_SCALP',
+            reason: `${edgeZone}: ${(yesEdge * 100).toFixed(1)}¢ edge ≥ ${(minRequiredEdge * 100).toFixed(0)}¢ required`,
+            cost: betSize,
+            fairValue: fairValueYes,
+            edgeZone: edgeZone,
+            minEdge: minRequiredEdge
+          };
+        }
+      }
+    }
+  }
+
+  // --- CHECK NO SIDE ---
+  if (market.noPrice <= MAX_PRICE && market.noPrice > 0.03) {
+    const noEdge = fairValueNo - market.noPrice;
+
+    // SCENARIO A: DEEP VALUE (Flash Crash)
+    if (noEdge >= DEEP_VALUE_EDGE) {
+      console.log(JSON.stringify({
+        action: 'DEEP_VALUE_DETECTED',
+        side: 'NO',
+        marketPrice: (market.noPrice * 100).toFixed(0) + '¢',
+        fairValue: (fairValueNo * 100).toFixed(0) + '¢',
+        edge: (noEdge * 100).toFixed(0) + '¢',
+        edgeZone: edgeZone,
+        minRequired: (minRequiredEdge * 100).toFixed(0) + '¢',
+        timestamp: new Date().toISOString()
+      }));
+
+      const betSize = Math.min(3.50, sequentialState.maxExposure - sequentialState.totalExposure);
+      const shares = Math.floor(betSize / (market.noPrice + 0.02));
+
+      if (shares >= 5) {
+        return {
+          action: 'BUY_NO',
+          price: market.noPrice + 0.02,
+          size: shares,
+          strategy: 'DEEP_VALUE',
+          reason: `DEEP VALUE: ${(noEdge * 100).toFixed(0)}¢ edge (FV=${(fairValueNo * 100).toFixed(0)}¢ vs Mkt=${(market.noPrice * 100).toFixed(0)}¢)`,
+          cost: betSize,
+          fairValue: fairValueNo,
+          edgeZone: edgeZone
+        };
+      }
+    }
+
+    // SCENARIO B: STANDARD DIP - TIME-WEIGHTED EDGE APPLIES
+    if (noEdge >= minRequiredEdge && volatility < 0.15) {
+      if (deltaPct <= 0.02) {
+        const betSize = Math.min(3.50, sequentialState.maxExposure - sequentialState.totalExposure);
+        const shares = Math.floor(betSize / (market.noPrice + 0.01));
+
+        if (shares >= 5) {
+          return {
+            action: 'BUY_NO',
+            price: market.noPrice + 0.01,
+            size: shares,
+            strategy: 'DIP_SCALP',
+            reason: `${edgeZone}: ${(noEdge * 100).toFixed(1)}¢ edge ≥ ${(minRequiredEdge * 100).toFixed(0)}¢ required`,
+            cost: betSize,
+            fairValue: fairValueNo
+          };
+        }
+      }
+    }
+  }
+
+  return { action: 'HOLD', reason: 'No edge found' };
+}
+
+/**
+ * Record when a trade is opened
+ */
+function onTradeOpened(side, entryPrice, shares, cost, tokenId) {
+  sequentialState.activePosition = {
+    side: side,
+    entryPrice: entryPrice,
+    shares: shares,
+    cost: cost,
+    tokenId: tokenId,
+    openedAt: Date.now()
+  };
+  sequentialState.positionHighWaterMark = entryPrice;
+  sequentialState.totalExposure += cost;
+  sequentialState.tradeCount++;
+
+  console.log(JSON.stringify({
+    action: 'SEQUENTIAL_POSITION_OPENED',
+    side: side,
+    entryPrice: entryPrice,
+    shares: shares,
+    cost: cost,
+    totalExposure: sequentialState.totalExposure,
+    tradeNumber: sequentialState.tradeCount,
+    timestamp: new Date().toISOString()
+  }));
+}
+
+/**
+ * Manage active position - Trailing Stop + Time Exits
+ *
+ * @param {Object} market - Current market data
+ * @returns {Object|null} Sell signal or null to hold
+ */
+function manageActivePosition(market) {
+  const pos = sequentialState.activePosition;
+  if (!pos) return null;
+
+  // Get current bid price (what we'd receive if we sold)
+  const currentBid = pos.side === 'YES' ? market.yesBid || market.yesPrice : market.noBid || market.noPrice;
+
+  // Update High Water Mark
+  if (currentBid > sequentialState.positionHighWaterMark) {
+    sequentialState.positionHighWaterMark = currentBid;
+  }
+
+  // Calculate P&L
+  const pnlPercent = ((currentBid - pos.entryPrice) / pos.entryPrice) * 100;
+
+  // =================================================================
+  // STOP LOSS (-40%) - Always Active
+  // =================================================================
+  if (pnlPercent <= -40) {
+    console.log(JSON.stringify({
+      action: 'STOP_LOSS_TRIGGERED',
+      entryPrice: pos.entryPrice,
+      currentBid: currentBid,
+      pnlPercent: pnlPercent.toFixed(1) + '%',
+      timestamp: new Date().toISOString()
+    }));
+
+    return {
+      action: pos.side === 'YES' ? 'SELL_YES' : 'SELL_NO',
+      price: currentBid,
+      size: pos.shares,
+      reason: 'STOP_LOSS',
+      pnl: (currentBid - pos.entryPrice) * pos.shares
+    };
+  }
+
+  // =================================================================
+  // GREEDY TRAILING STOP (Mid-Game: >60s left)
+  // Once we hit +60% profit, ride it but exit if momentum breaks
+  // =================================================================
+  if (market.secondsLeft && market.secondsLeft > 60) {
+    if (pnlPercent >= 60) {
+      const dropFromPeak = sequentialState.positionHighWaterMark - currentBid;
+
+      // Sell if dropped 3¢ from peak (momentum broken)
+      if (dropFromPeak >= 0.03) {
+        console.log(JSON.stringify({
+          action: 'TRAILING_STOP_TRIGGERED',
+          peak: sequentialState.positionHighWaterMark,
+          current: currentBid,
+          pnlPercent: pnlPercent.toFixed(1) + '%',
+          timestamp: new Date().toISOString()
+        }));
+
+        return {
+          action: pos.side === 'YES' ? 'SELL_YES' : 'SELL_NO',
+          price: currentBid,
+          size: pos.shares,
+          reason: 'TRAILING_STOP',
+          pnl: (currentBid - pos.entryPrice) * pos.shares
+        };
+      }
+    }
+    // Still climbing or not at +60% yet, hold
+    return null;
+  }
+
+  // =================================================================
+  // THE CLOSER (End-Game: <60s left)
+  // Only sell if outcome is UNCERTAIN (coin flip zone: 20-80¢)
+  // If winning (>80¢) or losing (<20¢), HOLD TO EXPIRY for max payout
+  // =================================================================
+  if (market.secondsLeft && market.secondsLeft < 60) {
+    // DANGER ZONE: Price between 20¢ and 80¢ = coin flip, exit to avoid gambling
+    if (currentBid > 0.20 && currentBid < 0.80) {
+      console.log(JSON.stringify({
+        action: 'ENDGAME_UNCERTAINTY_EXIT',
+        currentBid: currentBid.toFixed(2),
+        reason: 'Price in coin-flip zone (20-80¢), exiting to salvage',
+        pnlPercent: pnlPercent.toFixed(1) + '%',
+        timestamp: new Date().toISOString()
+      }));
+
+      return {
+        action: pos.side === 'YES' ? 'SELL_YES' : 'SELL_NO',
+        price: currentBid,
+        size: pos.shares,
+        reason: 'ENDGAME_UNCERTAINTY',
+        pnl: (currentBid - pos.entryPrice) * pos.shares
+      };
+    }
+
+    // HOLD TO EXPIRY: Price >80¢ (winning) or <20¢ (losing)
+    // - If >80¢: Get $1.00 instead of selling for 85¢
+    // - If <20¢: Selling for 5¢ isn't worth spread cost
+    console.log(JSON.stringify({
+      action: 'HOLDING_TO_EXPIRY',
+      currentBid: currentBid.toFixed(2),
+      reason: currentBid >= 0.80 ? 'Winning - hold for $1.00' : 'Lost - not worth selling',
+      secondsLeft: market.secondsLeft,
+      timestamp: new Date().toISOString()
+    }));
+
+    return null; // Let it expire
+  }
+
+  return null; // Default: keep holding
+}
+
+/**
+ * Record when a trade is closed
+ */
+function onTradeClosed(pnl) {
+  sequentialState.realizedPnL += pnl;
+
+  if (pnl < 0) {
+    sequentialState.hasLostTrade = true;
+    console.log(JSON.stringify({
+      action: 'SEQUENTIAL_WINDOW_STOP',
+      reason: 'Took a loss, stopping for this window',
+      pnl: pnl.toFixed(2),
+      totalPnL: sequentialState.realizedPnL.toFixed(2),
+      timestamp: new Date().toISOString()
+    }));
+  } else {
+    console.log(JSON.stringify({
+      action: 'SEQUENTIAL_CLIP_SUCCESS',
+      pnl: '+$' + pnl.toFixed(2),
+      totalPnL: '$' + sequentialState.realizedPnL.toFixed(2),
+      message: 'Ready to reload',
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  sequentialState.activePosition = null;
+  sequentialState.positionHighWaterMark = 0;
+}
+
+/**
+ * Get current sequential state (for debugging/display)
+ */
+function getSequentialState() {
+  return { ...sequentialState };
+}
+
+// ============================================================
+// EXPORTS
+// ============================================================
+
 module.exports = {
   assessMarketVibes,
   executeClipperStraddle,
@@ -1460,5 +2320,17 @@ module.exports = {
   clearLottoTicket,
   LOTTO_MAX_PRICE,
   LOTTO_BET_SIZE,
-  LOTTO_MIN_VOLATILITY
+  LOTTO_MIN_VOLATILITY,
+  // Sequential Scalping (Smart Stacking) exports
+  resetSequentialState,
+  evaluateTradeOpportunity,
+  onTradeOpened,
+  manageActivePosition,
+  onTradeClosed,
+  getSequentialState,
+  // Time-Weighted Edge exports
+  getTimeWeightedEdgeRequirement,
+  getEdgeZoneName,
+  // Mean Reversion exports
+  evaluateMeanReversionException
 };

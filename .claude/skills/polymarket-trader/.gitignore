@@ -25,6 +25,16 @@ config.json
 memory.json
 *.log
 logs/
+*-state.json
+treasury-log.json
+
+# Runtime Data Directories (generated during trading)
+scripts/flight_data/
+scripts/sessions/
+scripts/consultations/
+flight_data/
+sessions/
+consultations/
 
 # Node modules
 node_modules/

@@ -3,12 +3,29 @@ const path = require('path');
 
 // ============================================================
 // VIRTUAL ACCOUNT MANAGER
-// Manages Farm (60%), Degen (25%), and Clipper (15%) virtual accounts
+// Manages Farm (35%), Degen (15%), and Clipper (50%) virtual accounts
+// OPTIMIZED: CLIPPER is highest performer, gets majority allocation
 // ============================================================
 
 const ACCOUNTS_FILE = '/tmp/polymarket-virtual-accounts.json';
 
 let VIRTUAL_ACCOUNTS = null; // Initialized dynamically based on current balance
+
+// FIX #2: Settlement lock to prevent race conditions
+const settlingPositions = new Set();
+
+// ============================================================
+// FIX #3: Unified Capital Calculation (Single Source of Truth)
+// ============================================================
+
+/**
+ * Recalculate available capital from source of truth
+ * Always use this instead of direct subtraction to prevent drift
+ */
+function recalculateAvailableCapital(deskData) {
+  deskData.totalExposure = deskData.openPositions.reduce((sum, p) => sum + (p.costBasis || 0), 0);
+  deskData.availableCapital = deskData.currentBalance - deskData.totalExposure;
+}
 
 // ============================================================
 // INITIALIZATION
@@ -96,6 +113,54 @@ function initializeVirtualAccounts(currentBalance) {
         }));
       }
 
+      // MIGRATION v2: Reallocate from 60/25/15 to 35/15/50 (CLIPPER-heavy)
+      // This runs once when FARM allocation is still at old value
+      if (VIRTUAL_ACCOUNTS && VIRTUAL_ACCOUNTS.desks &&
+          VIRTUAL_ACCOUNTS.desks.CLIPPER &&
+          VIRTUAL_ACCOUNTS.desks.FARM.allocation > 0.40) {  // Detect old 60% allocation
+
+        console.log(JSON.stringify({
+          action: 'MIGRATING_TO_CLIPPER_HEAVY_ALLOCATION',
+          oldAllocation: 'FARM 60%, DEGEN 25%, CLIPPER 15%',
+          newAllocation: 'FARM 35%, DEGEN 15%, CLIPPER 50%',
+          reason: 'CLIPPER has 70% win rate vs FARM 28%',
+          timestamp: new Date().toISOString()
+        }));
+
+        const totalBalance = VIRTUAL_ACCOUNTS.fund.totalBalance;
+        const newFarmBalance2 = totalBalance * 0.35;
+        const newDegenBalance2 = totalBalance * 0.15;
+        const newClipperBalance2 = totalBalance * 0.50;
+
+        // Preserve open positions by keeping their costBasis intact
+        const farmExposure = VIRTUAL_ACCOUNTS.desks.FARM.totalExposure || 0;
+        const degenExposure = VIRTUAL_ACCOUNTS.desks.DEGEN.totalExposure || 0;
+        const clipperExposure = VIRTUAL_ACCOUNTS.desks.CLIPPER.totalExposure || 0;
+
+        // Update allocations and balances
+        VIRTUAL_ACCOUNTS.desks.FARM.allocation = 0.35;
+        VIRTUAL_ACCOUNTS.desks.FARM.currentBalance = newFarmBalance2;
+        VIRTUAL_ACCOUNTS.desks.FARM.availableCapital = newFarmBalance2 - farmExposure;
+
+        VIRTUAL_ACCOUNTS.desks.DEGEN.allocation = 0.15;
+        VIRTUAL_ACCOUNTS.desks.DEGEN.currentBalance = newDegenBalance2;
+        VIRTUAL_ACCOUNTS.desks.DEGEN.availableCapital = newDegenBalance2 - degenExposure;
+
+        VIRTUAL_ACCOUNTS.desks.CLIPPER.allocation = 0.50;
+        VIRTUAL_ACCOUNTS.desks.CLIPPER.currentBalance = newClipperBalance2;
+        VIRTUAL_ACCOUNTS.desks.CLIPPER.availableCapital = newClipperBalance2 - clipperExposure;
+
+        saveAccounts();
+
+        console.log(JSON.stringify({
+          action: 'CLIPPER_HEAVY_MIGRATION_COMPLETE',
+          farmBalance: newFarmBalance2.toFixed(2) + ' (35%)',
+          degenBalance: newDegenBalance2.toFixed(2) + ' (15%)',
+          clipperBalance: newClipperBalance2.toFixed(2) + ' (50%)',
+          timestamp: new Date().toISOString()
+        }));
+      }
+
       console.log(JSON.stringify({
         action: 'VIRTUAL_ACCOUNTS_LOADED',
         fundName: VIRTUAL_ACCOUNTS.fund.name,
@@ -107,10 +172,10 @@ function initializeVirtualAccounts(currentBalance) {
         timestamp: new Date().toISOString()
       }));
     } else {
-      // Initialize fresh with 60/25/15 split of current balance
-      const farmBalance = currentBalance * 0.60;
-      const degenBalance = currentBalance * 0.25;
-      const clipperBalance = currentBalance * 0.15;
+      // Initialize fresh with 35/15/50 split (CLIPPER-heavy for best performer)
+      const farmBalance = currentBalance * 0.35;
+      const degenBalance = currentBalance * 0.15;
+      const clipperBalance = currentBalance * 0.50;
 
       VIRTUAL_ACCOUNTS = {
         fund: {
@@ -123,7 +188,7 @@ function initializeVirtualAccounts(currentBalance) {
         },
         desks: {
           FARM: {
-            allocation: 0.60,
+            allocation: 0.35,
             currentBalance: farmBalance,
             startingBalance: farmBalance,
             inceptionBalance: farmBalance,
@@ -149,7 +214,7 @@ function initializeVirtualAccounts(currentBalance) {
             }
           },
           DEGEN: {
-            allocation: 0.25,
+            allocation: 0.15,
             currentBalance: degenBalance,
             startingBalance: degenBalance,
             inceptionBalance: degenBalance,
@@ -177,7 +242,7 @@ function initializeVirtualAccounts(currentBalance) {
             }
           },
           CLIPPER: {
-            allocation: 0.15,
+            allocation: 0.50,
             currentBalance: clipperBalance,
             startingBalance: clipperBalance,
             inceptionBalance: clipperBalance,
@@ -217,9 +282,9 @@ function initializeVirtualAccounts(currentBalance) {
         action: 'VIRTUAL_ACCOUNTS_INITIALIZED',
         fundName: VIRTUAL_ACCOUNTS.fund.name,
         totalBalance: currentBalance.toFixed(2),
-        farmBalance: farmBalance.toFixed(2) + ' (60%)',
-        degenBalance: degenBalance.toFixed(2) + ' (25%)',
-        clipperBalance: clipperBalance.toFixed(2) + ' (15%)',
+        farmBalance: farmBalance.toFixed(2) + ' (35%)',
+        degenBalance: degenBalance.toFixed(2) + ' (15%)',
+        clipperBalance: clipperBalance.toFixed(2) + ' (50%)',
         timestamp: new Date().toISOString()
       }));
     }
@@ -299,9 +364,9 @@ function recordTrade(desk, windowSlug, side, entryPrice, shares, costBasis, toke
     isStraddleOrigin: isStraddleOrigin // NEW: Track if from straddle
   });
 
-  // Update exposure
-  deskData.totalExposure += costBasis;
-  deskData.availableCapital -= costBasis;
+  // FIX #3: Use unified capital calculation instead of direct subtraction
+  // This prevents drift between totalExposure and availableCapital
+  recalculateAvailableCapital(deskData);
 
   console.log(JSON.stringify({
     action: 'TRADE_RECORDED',
@@ -329,25 +394,92 @@ function settlePosition(desk, windowSlug, winner) {
     throw new Error(`Invalid desk: ${desk}`);
   }
 
-  const deskData = VIRTUAL_ACCOUNTS.desks[desk];
-  const positionIndex = deskData.openPositions.findIndex(p => p.windowSlug === windowSlug);
-
-  if (positionIndex === -1) {
-    return null; // No position for this desk in this window
+  // FIX #8: Validate winner parameter
+  if (winner !== 'YES' && winner !== 'NO') {
+    console.log(JSON.stringify({
+      action: 'SETTLEMENT_REJECTED',
+      reason: 'Invalid winner value',
+      winner: winner,
+      desk: desk,
+      windowSlug: windowSlug,
+      timestamp: new Date().toISOString()
+    }));
+    return null;
   }
 
-  const position = deskData.openPositions[positionIndex];
-  const won = position.side === winner;
+  // FIX #2: Lock to prevent concurrent settlement of same position
+  const lockKey = `${desk}-${windowSlug}`;
+  if (settlingPositions.has(lockKey)) {
+    console.log(JSON.stringify({
+      action: 'SETTLEMENT_BLOCKED',
+      reason: 'Already being settled by another process',
+      lockKey: lockKey,
+      timestamp: new Date().toISOString()
+    }));
+    return null;
+  }
+
+  settlingPositions.add(lockKey);
+
+  try {
+    const deskData = VIRTUAL_ACCOUNTS.desks[desk];
+
+    // ATOMIC SETTLEMENT: Find and IMMEDIATELY remove in one operation
+    const positionIndex = deskData.openPositions.findIndex(p => p.windowSlug === windowSlug);
+    if (positionIndex === -1) {
+      return null; // No position for this desk in this window
+    }
+
+    // Remove FIRST (atomic) - position is now "claimed"
+    const [position] = deskData.openPositions.splice(positionIndex, 1);
+
+    // FIX #8: Validate position object has required fields
+    if (!position.side || !['YES', 'NO'].includes(position.side)) {
+      console.error(JSON.stringify({
+        action: 'CORRUPTED_POSITION',
+        field: 'side',
+        value: position.side,
+        windowSlug: windowSlug,
+        timestamp: new Date().toISOString()
+      }));
+      return null;
+    }
+
+    if (typeof position.shares !== 'number' || position.shares <= 0) {
+      console.error(JSON.stringify({
+        action: 'CORRUPTED_POSITION',
+        field: 'shares',
+        value: position.shares,
+        windowSlug: windowSlug,
+        timestamp: new Date().toISOString()
+      }));
+      return null;
+    }
+
+    if (typeof position.costBasis !== 'number' || position.costBasis <= 0) {
+      console.error(JSON.stringify({
+        action: 'CORRUPTED_POSITION',
+        field: 'costBasis',
+        value: position.costBasis,
+        windowSlug: windowSlug,
+        timestamp: new Date().toISOString()
+      }));
+      return null;
+    }
+
+    // Generate transaction ID for audit trail
+    const txId = `settle-${desk}-${windowSlug}-${Date.now()}`;
+
+    // NOW calculate P&L (position already removed, safe from race conditions)
+    const won = position.side === winner;
 
   // Calculate P&L
   const profit = won ?
     position.shares * (1.00 - position.entryPrice) :
     -position.costBasis;
 
-  // Update balance
-  deskData.currentBalance += (position.costBasis + profit);
-  deskData.totalExposure -= position.costBasis;
-  deskData.availableCapital = deskData.currentBalance - deskData.totalExposure;
+    // Update balance (payout = costBasis + profit)
+    deskData.currentBalance += (position.costBasis + profit);
 
   // Update stats
   deskData.lifetimeStats.totalTrades++;
@@ -402,10 +534,10 @@ function settlePosition(desk, windowSlug, winner) {
   // Update ROI
   deskData.lifetimeStats.roi = deskData.lifetimeStats.totalProfit / deskData.inceptionBalance;
 
-  // Remove position
-  deskData.openPositions.splice(positionIndex, 1);
+    // FIX #3: Use unified calculation for exposure and available capital
+    recalculateAvailableCapital(deskData);
 
-  // Update fund totals (all 3 desks)
+    // Update fund totals (all 3 desks)
   VIRTUAL_ACCOUNTS.fund.totalBalance =
     VIRTUAL_ACCOUNTS.desks.FARM.currentBalance +
     VIRTUAL_ACCOUNTS.desks.DEGEN.currentBalance +
@@ -418,8 +550,11 @@ function settlePosition(desk, windowSlug, winner) {
 
   console.log(JSON.stringify({
     action: 'POSITION_SETTLED',
+    txId: txId,  // Audit trail for atomic settlement
     desk: desk,
     window: windowSlug,
+    side: position.side,
+    winner: winner,
     won: won,
     profit: profit.toFixed(2),
     roi: (profit / position.costBasis * 100).toFixed(1) + '%',
@@ -429,14 +564,19 @@ function settlePosition(desk, windowSlug, winner) {
     timestamp: new Date().toISOString()
   }));
 
-  saveAccounts();
+    saveAccounts();
 
-  return {
-    won: won,
-    profit: profit,
-    roi: profit / position.costBasis,
-    newBalance: deskData.currentBalance
-  };
+    return {
+      won: won,
+      profit: profit,
+      roi: profit / position.costBasis,
+      newBalance: deskData.currentBalance,
+      txId: txId  // Return txId for verification
+    };
+  } finally {
+    // FIX #2: Always release lock, even on error
+    settlingPositions.delete(lockKey);
+  }
 }
 
 // ============================================================
@@ -494,11 +634,31 @@ function checkRebalancing() {
         `Rebalancing to 80/20 ratio (Degen had $${degenImbalance.toFixed(2)} excess)`);
     }
   }
+
+  // FIX #12: SCENARIO 5 - CLIPPER needs refuel
+  const clipper = VIRTUAL_ACCOUNTS.desks.CLIPPER;
+  if (clipper) {
+    const clipperMinBalance = VIRTUAL_ACCOUNTS.fund.totalBalance * 0.05;  // 5% minimum
+
+    if (clipper.currentBalance < clipperMinBalance && farm.availableCapital > clipperMinBalance) {
+      const refuelAmount = Math.min(clipperMinBalance, farm.availableCapital * 0.10);
+      console.log(JSON.stringify({
+        action: 'CLIPPER_REFUEL_TRIGGERED',
+        clipperBalance: clipper.currentBalance.toFixed(2),
+        threshold: clipperMinBalance.toFixed(2),
+        refuelAmount: refuelAmount.toFixed(2),
+        timestamp: new Date().toISOString()
+      }));
+      executeDeskTransfer('FARM', 'CLIPPER', refuelAmount, 'clipper_refuel',
+        `CLIPPER below 5% threshold ($${clipper.currentBalance.toFixed(2)} < $${clipperMinBalance.toFixed(2)})`);
+    }
+  }
 }
 
 function executeDeskTransfer(fromDesk, toDesk, amount, type, reason) {
-  if ((fromDesk !== 'FARM' && fromDesk !== 'DEGEN') ||
-      (toDesk !== 'FARM' && toDesk !== 'DEGEN')) {
+  // FIX #12: Allow CLIPPER desk in transfers
+  const validDesks = ['FARM', 'DEGEN', 'CLIPPER'];
+  if (!validDesks.includes(fromDesk) || !validDesks.includes(toDesk)) {
     throw new Error(`Invalid desk in transfer: ${fromDesk} → ${toDesk}`);
   }
 
@@ -559,9 +719,33 @@ function executeDeskTransfer(fromDesk, toDesk, amount, type, reason) {
 }
 
 function calculateRecentProfit(desk, numWindows) {
-  // This would need to query dialogue history
-  // For now, stub implementation
-  return 0.00;
+  const deskData = VIRTUAL_ACCOUNTS?.desks?.[desk];
+  if (!deskData) return 0.00;
+
+  const stats = deskData.lifetimeStats;
+
+  // If we have fewer trades than requested windows, return total profit
+  if (stats.totalTrades < numWindows) {
+    return stats.totalProfit;
+  }
+
+  // Approximate recent profit from average trade profit and recent streak
+  // This is an estimation since we don't track per-window P&L history
+  const avgTradeProfit = stats.totalProfit / stats.totalTrades;
+
+  // Weight recent trades more heavily based on streak
+  if (stats.streakType === 'WIN' && stats.currentStreak > 0) {
+    // Recent wins - estimate recent profit is above average
+    const recentMultiplier = 1 + (stats.currentStreak * 0.1);
+    return avgTradeProfit * Math.min(numWindows, stats.totalTrades) * recentMultiplier;
+  } else if (stats.streakType === 'LOSS' && stats.currentStreak > 0) {
+    // Recent losses - estimate recent profit is below average
+    const recentMultiplier = 1 - (stats.currentStreak * 0.1);
+    return avgTradeProfit * Math.min(numWindows, stats.totalTrades) * recentMultiplier;
+  }
+
+  // Default: use average
+  return avgTradeProfit * Math.min(numWindows, stats.totalTrades);
 }
 
 // ============================================================
@@ -682,6 +866,206 @@ function recordClip(desk, clipProfit, clipPercentage) {
 }
 
 // ============================================================
+// STALE POSITION CLEANUP (Self-Healing)
+// ============================================================
+
+/**
+ * Remove positions from expired windows.
+ * Call on startup and periodically during runtime.
+ * This makes the bot self-healing - it cleans up after crashes/failures.
+ *
+ * @returns {Object} { removed: number, remaining: number }
+ */
+function cleanupExpiredPositions() {
+  // Guard: If accounts not initialized yet, nothing to clean
+  if (!VIRTUAL_ACCOUNTS || !VIRTUAL_ACCOUNTS.desks) {
+    return { removed: 0, remaining: 0 };
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  let totalRemoved = 0;
+
+  for (const deskName of Object.keys(VIRTUAL_ACCOUNTS.desks)) {
+    const desk = VIRTUAL_ACCOUNTS.desks[deskName];
+    const before = desk.openPositions.length;
+
+    desk.openPositions = desk.openPositions.filter(pos => {
+      // Extract timestamp from windowSlug: "btc-updown-15m-1769908500"
+      const match = pos.windowSlug.match(/(\d+)$/);
+      if (!match) return false;  // Invalid slug, remove it
+
+      const windowStart = parseInt(match[1], 10);
+      const windowEnd = windowStart + 900;  // 15 minutes
+      const isExpired = windowEnd < now;
+
+      if (isExpired) {
+        console.log(JSON.stringify({
+          action: 'CLEANUP_EXPIRED_POSITION',
+          desk: deskName,
+          windowSlug: pos.windowSlug,
+          side: pos.side,
+          costBasis: pos.costBasis,
+          expiredSecondsAgo: now - windowEnd,
+          timestamp: new Date().toISOString()
+        }));
+      }
+
+      return !isExpired;  // Keep only non-expired
+    });
+
+    totalRemoved += (before - desk.openPositions.length);
+
+    // Recalculate exposure from remaining positions
+    desk.totalExposure = desk.openPositions.reduce((sum, p) => sum + p.costBasis, 0);
+    desk.availableCapital = desk.currentBalance - desk.totalExposure;
+  }
+
+  if (totalRemoved > 0) {
+    saveAccounts();
+    console.log(JSON.stringify({
+      action: 'CLEANUP_COMPLETE',
+      positionsRemoved: totalRemoved,
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  return {
+    removed: totalRemoved,
+    remaining: VIRTUAL_ACCOUNTS?.desks
+      ? Object.values(VIRTUAL_ACCOUNTS.desks).reduce((sum, d) => sum + d.openPositions.length, 0)
+      : 0
+  };
+}
+
+// ============================================================
+// DYNAMIC RISK CAP (Fractal Scaling)
+// ============================================================
+
+/**
+ * Calculate dynamic per-window risk cap (15% of War Chest)
+ * This is the maximum dollars we can risk in a single 15-minute window.
+ *
+ * The bot becomes "fractal" - trades the same way with $50 or $50,000
+ *
+ * @returns {number} Max exposure in dollars for this window
+ */
+function getPerWindowRiskCap() {
+  // Import wealth fortress to get War Chest
+  let wealthFortress;
+  try {
+    wealthFortress = require('./wealth-fortress');
+  } catch (e) {
+    // Fallback: use 15% of total balance
+    const totalBalance = VIRTUAL_ACCOUNTS?.fund?.totalBalance || 36.00;
+    return Math.max(1.00, totalBalance * 0.15);
+  }
+
+  const warChest = wealthFortress.getTradeableBalance();
+  const RISK_PERCENTAGE = 0.15;  // 15% of War Chest per window
+
+  let cap = warChest * RISK_PERCENTAGE;
+
+  // Safety Floor: At least $1 for lotto tickets if we have funds
+  if (cap < 1.00 && warChest > 1.00) {
+    cap = 1.00;
+  }
+
+  return parseFloat(cap.toFixed(2));
+}
+
+/**
+ * Get total exposure across ALL desks for current window
+ * Used for global cap enforcement - prevents any single window
+ * from draining the entire War Chest
+ *
+ * @returns {number} Total exposure in dollars across all desks
+ */
+function getTotalWindowExposure() {
+  if (!VIRTUAL_ACCOUNTS?.desks) return 0;
+
+  let total = 0;
+  for (const deskName of Object.keys(VIRTUAL_ACCOUNTS.desks)) {
+    const desk = VIRTUAL_ACCOUNTS.desks[deskName];
+    total += desk.totalExposure || 0;
+  }
+  return total;
+}
+
+/**
+ * Update all open positions with current market prices
+ * Call this before any clipping decision to have accurate unrealizedPL
+ *
+ * @param {Object} marketData - Current market data with yesPrice and noPrice
+ */
+function updatePositionValues(marketData) {
+  if (!marketData || typeof marketData.yesPrice !== 'number' || typeof marketData.noPrice !== 'number') {
+    return;
+  }
+
+  if (!VIRTUAL_ACCOUNTS?.desks) return;
+
+  for (const deskName of Object.keys(VIRTUAL_ACCOUNTS.desks)) {
+    const desk = VIRTUAL_ACCOUNTS.desks[deskName];
+
+    for (const position of desk.openPositions) {
+      const currentPrice = position.side === 'YES' ? marketData.yesPrice : marketData.noPrice;
+      position.currentValue = position.shares * currentPrice;
+      position.unrealizedPL = position.currentValue - position.costBasis;
+      position.lastPriceUpdate = Date.now();
+    }
+  }
+}
+
+/**
+ * Mark a straddle as settled after window closes
+ *
+ * @param {string} desk - Desk name (CLIPPER)
+ * @param {string} windowSlug - Window identifier
+ * @param {string} winner - Winning side ('YES' or 'NO')
+ */
+function settleStraddle(desk, windowSlug, winner) {
+  const deskData = VIRTUAL_ACCOUNTS?.desks?.[desk];
+  if (!deskData?.straddlePositions) return null;
+
+  const straddleIndex = deskData.straddlePositions.findIndex(
+    s => s.windowSlug === windowSlug && !s.settled
+  );
+
+  if (straddleIndex === -1) return null;
+
+  const straddle = deskData.straddlePositions[straddleIndex];
+
+  // Calculate payout (winner side pays out at $1, loser side is $0)
+  const winningShares = winner === 'YES' ? straddle.yesShares : straddle.noShares;
+  const payout = winningShares * 1.00;
+  const profit = payout - straddle.totalCost;
+
+  // Mark as settled
+  straddle.settled = true;
+  straddle.settledAt = new Date().toISOString();
+  straddle.winner = winner;
+  straddle.profit = profit;
+
+  // Update balance
+  deskData.currentBalance += payout;
+  deskData.availableCapital = deskData.currentBalance - deskData.totalExposure;
+
+  console.log(JSON.stringify({
+    action: 'STRADDLE_SETTLED',
+    desk: desk,
+    window: windowSlug,
+    winner: winner,
+    profit: profit.toFixed(2),
+    newBalance: deskData.currentBalance.toFixed(2),
+    timestamp: new Date().toISOString()
+  }));
+
+  saveAccounts();
+
+  return { profit, payout };
+}
+
+// ============================================================
 // EXPORTS
 // ============================================================
 
@@ -696,8 +1080,13 @@ module.exports = {
   settlePosition,
   checkRebalancing,
   executeDeskTransfer,
-  recordStraddle,        // NEW: Straddle tracking
-  getStraddlePositions,  // NEW: Get straddles
-  recordClip,            // NEW: Clip tracking
-  saveAccounts           // NEW: Expose save function for clipper-desk-manager
+  recordStraddle,        // Straddle tracking
+  getStraddlePositions,  // Get straddles
+  recordClip,            // Clip tracking
+  saveAccounts,          // Expose save function for clipper-desk-manager
+  getPerWindowRiskCap,   // Dynamic risk scaling
+  getTotalWindowExposure, // Global cap enforcement
+  updatePositionValues,   // Real-time P&L updates
+  settleStraddle,         // Straddle settlement
+  cleanupExpiredPositions // Self-healing cleanup
 };

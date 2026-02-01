@@ -12,6 +12,73 @@
  */
 
 const { execSync, spawn } = require('child_process');
+const https = require('https');
+
+// ============================================================
+// SHADOW MODE - Simulation Bridge Integration
+// Set SHADOW_MODE=true to test without real money
+// ============================================================
+const simulationBridge = require('./simulation-bridge');
+const SHADOW_MODE = process.env.SHADOW_MODE === 'true';
+
+// Global window context for shadow mode (set by main bot)
+let CURRENT_WINDOW_CONTEXT = {
+  slug: 'unknown',
+  btcOpenPrice: 0,
+  desk: 'UNKNOWN'
+};
+
+/**
+ * Set the current window context for shadow mode trades
+ * Call this at the start of each window in the main bot
+ */
+function setWindowContext(slug, btcOpenPrice, desk = 'UNKNOWN') {
+  CURRENT_WINDOW_CONTEXT = { slug, btcOpenPrice, desk };
+  if (SHADOW_MODE) {
+    console.log(JSON.stringify({
+      action: 'SHADOW_WINDOW_CONTEXT_SET',
+      slug: slug,
+      btcOpenPrice: btcOpenPrice?.toFixed(2) || '0',
+      desk: desk,
+      timestamp: new Date().toISOString()
+    }));
+  }
+}
+
+/**
+ * Get current window context
+ */
+function getWindowContext() {
+  return CURRENT_WINDOW_CONTEXT;
+}
+
+// ============================================================
+// POST-TRADE VERIFICATION CONFIG (Gemini Recommended)
+// ============================================================
+const VERIFICATION_CONFIG = {
+  enabled: true,
+  maxRetries: 3,
+  retryDelayMs: 1000,  // Initial delay, doubles each retry
+  apiBaseUrl: 'https://clob.polymarket.com',
+  tolerance: 0.01,  // 1 cent tolerance for float precision
+  timeoutMs: 10000
+};
+
+// ============================================================
+// LOG OBFUSCATION - Fix #15: Mask sensitive data in logs
+// ============================================================
+
+/**
+ * Mask sensitive identifiers for secure logging
+ * Shows first 6 and last 4 characters only
+ * @param {string} id - Token ID or address to mask
+ * @returns {string} Masked identifier
+ */
+function maskId(id) {
+  if (!id || typeof id !== 'string') return id;
+  if (id.length <= 10) return id;
+  return `${id.substring(0, 6)}...${id.substring(id.length - 4)}`;
+}
 
 // ASCII art pattern to strip from pmarket-cli output
 const ASCII_ART_PATTERN = /\s*_\s*_\s*_\s*_\s*_\s*_\s*_\s*_\s*\n.*pmarket.*cli.*\n.*\n.*\n.*\n.*\|_\|.*/s;
@@ -106,6 +173,308 @@ function parseCLIOutput(output) {
   }
 
   return results;
+}
+
+// ============================================================
+// POST-TRADE VERIFICATION (Gemini Recommended Strategy)
+// Verifies actual fill data from Polymarket API after each trade
+// ============================================================
+
+/**
+ * Make an HTTPS GET request to Polymarket CLOB API
+ * @param {string} path - API path (e.g., '/orders/0x123...')
+ * @returns {Promise<object>} Parsed JSON response
+ */
+function apiRequest(path) {
+  return new Promise((resolve, reject) => {
+    const url = `${VERIFICATION_CONFIG.apiBaseUrl}${path}`;
+
+    const req = https.get(url, {
+      timeout: VERIFICATION_CONFIG.timeoutMs,
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'polymarket-trader-bot/1.0'
+      }
+    }, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          if (res.statusCode === 200) {
+            resolve(JSON.parse(data));
+          } else if (res.statusCode === 404) {
+            reject(new Error('ORDER_NOT_FOUND'));
+          } else {
+            reject(new Error(`API_ERROR_${res.statusCode}`));
+          }
+        } catch (e) {
+          reject(new Error('JSON_PARSE_ERROR: ' + e.message));
+        }
+      });
+    });
+
+    req.on('error', (e) => reject(e));
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('REQUEST_TIMEOUT'));
+    });
+  });
+}
+
+/**
+ * Delay helper for retry backoff
+ */
+function delay(ms) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* busy wait for sync */ }
+}
+
+/**
+ * Verify a completed trade against Polymarket API
+ * This ensures our virtual accounts match actual fill data
+ *
+ * @param {string} orderId - The order ID from pmarket-cli
+ * @param {object} reportedFill - What pmarket-cli reported { shares, cost, avgPrice }
+ * @param {number} retryCount - Current retry attempt
+ * @returns {object} Verified fill data or error
+ */
+async function verifyTrade(orderId, reportedFill, retryCount = 0) {
+  if (!VERIFICATION_CONFIG.enabled) {
+    return { verified: false, skipped: true, reason: 'VERIFICATION_DISABLED' };
+  }
+
+  if (!orderId) {
+    return { verified: false, error: 'NO_ORDER_ID' };
+  }
+
+  console.log(JSON.stringify({
+    action: 'TRADE_VERIFICATION_START',
+    orderId: maskId(orderId),
+    reportedShares: reportedFill.shares?.toFixed(2),
+    reportedCost: reportedFill.cost?.toFixed(4),
+    attempt: retryCount + 1,
+    timestamp: new Date().toISOString()
+  }));
+
+  try {
+    // Query the order details from Polymarket API
+    const orderData = await apiRequest(`/order/${orderId}`);
+
+    // Check order status
+    if (!['MATCHED', 'FILLED', 'matched', 'filled'].includes(orderData.status?.toUpperCase())) {
+      if (['OPEN', 'LIVE', 'open', 'live'].includes(orderData.status?.toLowerCase())) {
+        // Order still open, retry after delay
+        if (retryCount < VERIFICATION_CONFIG.maxRetries) {
+          const delayMs = VERIFICATION_CONFIG.retryDelayMs * Math.pow(2, retryCount);
+          console.log(JSON.stringify({
+            action: 'TRADE_VERIFICATION_RETRY',
+            reason: 'Order still open',
+            status: orderData.status,
+            retryIn: delayMs + 'ms',
+            attempt: retryCount + 1,
+            timestamp: new Date().toISOString()
+          }));
+          delay(delayMs);
+          return verifyTrade(orderId, reportedFill, retryCount + 1);
+        }
+      }
+
+      return {
+        verified: false,
+        error: 'ORDER_NOT_FILLED',
+        status: orderData.status
+      };
+    }
+
+    // Extract actual fill data
+    let actualShares = 0;
+    let actualCost = 0;
+
+    // Try different field names (API response varies)
+    if (orderData.size_matched) {
+      actualShares = parseFloat(orderData.size_matched);
+    } else if (orderData.filledSize) {
+      actualShares = parseFloat(orderData.filledSize);
+    } else if (orderData.takingAmount) {
+      actualShares = parseFloat(orderData.takingAmount);
+    }
+
+    if (orderData.price && actualShares > 0) {
+      actualCost = actualShares * parseFloat(orderData.price);
+    } else if (orderData.makingAmount) {
+      actualCost = parseFloat(orderData.makingAmount);
+    } else if (orderData.totalCost) {
+      actualCost = parseFloat(orderData.totalCost);
+    }
+
+    // Calculate average price
+    const actualAvgPrice = actualShares > 0 ? actualCost / actualShares : 0;
+
+    // Compare with reported values
+    const sharesDiff = Math.abs((reportedFill.shares || 0) - actualShares);
+    const costDiff = Math.abs((reportedFill.cost || 0) - actualCost);
+
+    const sharesMatch = sharesDiff <= VERIFICATION_CONFIG.tolerance;
+    const costMatch = costDiff <= VERIFICATION_CONFIG.tolerance;
+
+    if (sharesMatch && costMatch) {
+      console.log(JSON.stringify({
+        action: 'TRADE_VERIFICATION_SUCCESS',
+        orderId: maskId(orderId),
+        actualShares: actualShares.toFixed(2),
+        actualCost: actualCost.toFixed(4),
+        actualAvgPrice: actualAvgPrice.toFixed(4),
+        status: 'MATCHED',
+        timestamp: new Date().toISOString()
+      }));
+
+      return {
+        verified: true,
+        matches: true,
+        shares: actualShares,
+        cost: actualCost,
+        avgPrice: actualAvgPrice,
+        status: orderData.status
+      };
+    } else {
+      // DISCREPANCY DETECTED - This is critical!
+      console.log(JSON.stringify({
+        action: 'TRADE_VERIFICATION_DISCREPANCY',
+        orderId: maskId(orderId),
+        reportedShares: reportedFill.shares?.toFixed(2),
+        actualShares: actualShares.toFixed(2),
+        sharesDiff: sharesDiff.toFixed(4),
+        reportedCost: reportedFill.cost?.toFixed(4),
+        actualCost: actualCost.toFixed(4),
+        costDiff: costDiff.toFixed(4),
+        USING_ACTUAL: true,
+        timestamp: new Date().toISOString()
+      }));
+
+      // Return ACTUAL values (not reported) - this fixes the virtual account sync!
+      return {
+        verified: true,
+        matches: false,
+        discrepancy: {
+          reportedShares: reportedFill.shares,
+          actualShares: actualShares,
+          reportedCost: reportedFill.cost,
+          actualCost: actualCost
+        },
+        // Use actual values for position tracking
+        shares: actualShares,
+        cost: actualCost,
+        avgPrice: actualAvgPrice,
+        status: orderData.status
+      };
+    }
+
+  } catch (error) {
+    console.log(JSON.stringify({
+      action: 'TRADE_VERIFICATION_ERROR',
+      orderId: maskId(orderId),
+      error: error.message,
+      attempt: retryCount + 1,
+      timestamp: new Date().toISOString()
+    }));
+
+    // Retry on transient errors
+    if (retryCount < VERIFICATION_CONFIG.maxRetries &&
+        !error.message.includes('ORDER_NOT_FOUND')) {
+      const delayMs = VERIFICATION_CONFIG.retryDelayMs * Math.pow(2, retryCount);
+      delay(delayMs);
+      return verifyTrade(orderId, reportedFill, retryCount + 1);
+    }
+
+    return {
+      verified: false,
+      error: error.message,
+      fallbackToReported: true,
+      shares: reportedFill.shares,
+      cost: reportedFill.cost,
+      avgPrice: reportedFill.avgPrice
+    };
+  }
+}
+
+/**
+ * Synchronous wrapper for verifyTrade (for use in sync code paths)
+ */
+function verifyTradeSync(orderId, reportedFill) {
+  // Since we're in a sync context, we use a blocking approach
+  // This is acceptable because verification happens right after the trade
+
+  try {
+    const { execSync } = require('child_process');
+
+    // Use curl to make the API request synchronously
+    const curlCmd = `curl -s -m 10 "${VERIFICATION_CONFIG.apiBaseUrl}/order/${orderId}"`;
+    const result = execSync(curlCmd, { encoding: 'utf8', timeout: 15000 });
+
+    const orderData = JSON.parse(result);
+
+    // Extract actual fill data
+    let actualShares = parseFloat(orderData.size_matched || orderData.filledSize || orderData.takingAmount || 0);
+    let actualCost = 0;
+
+    if (orderData.price && actualShares > 0) {
+      actualCost = actualShares * parseFloat(orderData.price);
+    } else {
+      actualCost = parseFloat(orderData.makingAmount || orderData.totalCost || 0);
+    }
+
+    const actualAvgPrice = actualShares > 0 ? actualCost / actualShares : 0;
+
+    // Check for discrepancy
+    const sharesDiff = Math.abs((reportedFill.shares || 0) - actualShares);
+    const costDiff = Math.abs((reportedFill.cost || 0) - actualCost);
+
+    if (sharesDiff > VERIFICATION_CONFIG.tolerance || costDiff > VERIFICATION_CONFIG.tolerance) {
+      console.log(JSON.stringify({
+        action: 'TRADE_VERIFICATION_DISCREPANCY',
+        orderId: maskId(orderId),
+        reportedShares: reportedFill.shares?.toFixed(2),
+        actualShares: actualShares.toFixed(2),
+        reportedCost: reportedFill.cost?.toFixed(4),
+        actualCost: actualCost.toFixed(4),
+        USING_ACTUAL: true,
+        timestamp: new Date().toISOString()
+      }));
+    } else {
+      console.log(JSON.stringify({
+        action: 'TRADE_VERIFICATION_SUCCESS',
+        orderId: maskId(orderId),
+        actualShares: actualShares.toFixed(2),
+        actualCost: actualCost.toFixed(4),
+        timestamp: new Date().toISOString()
+      }));
+    }
+
+    return {
+      verified: true,
+      shares: actualShares || reportedFill.shares,
+      cost: actualCost || reportedFill.cost,
+      avgPrice: actualAvgPrice || reportedFill.avgPrice
+    };
+
+  } catch (error) {
+    console.log(JSON.stringify({
+      action: 'TRADE_VERIFICATION_FAILED',
+      orderId: maskId(orderId),
+      error: error.message,
+      fallbackToReported: true,
+      timestamp: new Date().toISOString()
+    }));
+
+    // Fall back to reported values if verification fails
+    return {
+      verified: false,
+      error: error.message,
+      shares: reportedFill.shares,
+      cost: reportedFill.cost,
+      avgPrice: reportedFill.avgPrice
+    };
+  }
 }
 
 /**
@@ -222,9 +591,116 @@ function getOrderbook(tokenId) {
 function placeBuyOrder(tokenId, amountUSDC, price, options = {}) {
   const { maxRetries = 2, retryDelayMs = 2000 } = options;
 
+  // ═══════════════════════════════════════════════════════════════════
+  // SHADOW MODE: Intercept and simulate execution
+  // ═══════════════════════════════════════════════════════════════════
+  if (SHADOW_MODE) {
+    console.log(JSON.stringify({
+      action: 'SHADOW_MODE_INTERCEPT',
+      type: 'BUY',
+      tokenId: maskId(tokenId),
+      amount: amountUSDC.toFixed(2),
+      price: price.toFixed(4),
+      timestamp: new Date().toISOString()
+    }));
+
+    // Use provided options or fall back to global window context
+    const ctx = CURRENT_WINDOW_CONTEXT;
+    const shadowResult = simulationBridge.mockExecution(
+      tokenId,
+      amountUSDC,
+      price,
+      options.side || 'YES',
+      options.windowSlug || ctx.slug || 'unknown',
+      options.btcOpenPrice || ctx.btcOpenPrice || 0,
+      options.desk || ctx.desk || 'UNKNOWN'
+    );
+
+    if (shadowResult.success) {
+      return {
+        success: true,
+        orderID: shadowResult.orderID,
+        status: shadowResult.status,
+        sharesReceived: parseFloat(shadowResult.takingAmount),
+        costUSDC: parseFloat(shadowResult.makingAmount),
+        avgFillPrice: shadowResult.avgPrice,
+        txHash: shadowResult.transactionHash,
+        _shadow: true
+      };
+    } else {
+      return {
+        success: false,
+        error: shadowResult.error,
+        _shadow: true
+      };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // MINIMUM SHARE ENFORCEMENT: Polymarket requires minimum 5 shares
+  // If amountUSDC/price < 5, bump up the amount to ensure 5 shares
+  // BUT: Only boost up to 20% - beyond that, skip the trade entirely
+  // ═══════════════════════════════════════════════════════════════════
+  const MIN_SHARES = 5.1;  // Use 5.1 to stay safely above limit
+  const MAX_BOOST_RATIO = 1.20;  // Maximum 20% over-leverage tolerance
+  const impliedShares = amountUSDC / price;
+
+  if (impliedShares < MIN_SHARES) {
+    const requiredAmount = MIN_SHARES * price * 1.02; // Add 2% buffer for rounding
+    const boostRatio = requiredAmount / amountUSDC;
+
+    // Check if boost is within tolerance
+    if (boostRatio <= MAX_BOOST_RATIO) {
+      // FIX #11: Validate boosted amount doesn't exceed available capital
+      if (options.availableCapital !== undefined && requiredAmount > options.availableCapital) {
+        console.log(JSON.stringify({
+          action: 'BOOST_EXCEEDS_CAPITAL',
+          requested: amountUSDC.toFixed(2),
+          boosted: requiredAmount.toFixed(2),
+          available: options.availableCapital.toFixed(2),
+          timestamp: new Date().toISOString()
+        }));
+        return {
+          success: false,
+          error: 'BOOST_EXCEEDS_CAPITAL',
+          reason: `Boosted amount $${requiredAmount.toFixed(2)} exceeds available $${options.availableCapital.toFixed(2)}`
+        };
+      }
+
+      console.log(JSON.stringify({
+        action: 'EXECUTION_DESK_MIN_SHARE_ADJUSTMENT',
+        originalAmount: amountUSDC.toFixed(2),
+        adjustedAmount: requiredAmount.toFixed(2),
+        impliedShares: impliedShares.toFixed(1),
+        boostPercent: ((boostRatio - 1) * 100).toFixed(0) + '%',
+        price: price.toFixed(4),
+        reason: 'Bumped to ensure 5 minimum shares (within 20% tolerance)',
+        timestamp: new Date().toISOString()
+      }));
+      amountUSDC = requiredAmount;
+    } else {
+      // Boost too large - skip the trade entirely
+      console.log(JSON.stringify({
+        action: 'EXECUTION_DESK_ORDER_SKIPPED',
+        originalAmount: amountUSDC.toFixed(2),
+        requiredAmount: requiredAmount.toFixed(2),
+        impliedShares: impliedShares.toFixed(1),
+        boostPercent: ((boostRatio - 1) * 100).toFixed(0) + '%',
+        price: price.toFixed(4),
+        reason: 'Order too small - would require >' + ((MAX_BOOST_RATIO - 1) * 100) + '% boost',
+        timestamp: new Date().toISOString()
+      }));
+      return {
+        success: false,
+        error: 'UNDER_MIN_SHARES',
+        reason: `Order requires ${impliedShares.toFixed(1)} shares but minimum is 5. Boost of ${((boostRatio - 1) * 100).toFixed(0)}% exceeds 20% tolerance.`
+      };
+    }
+  }
+
   console.log(JSON.stringify({
     action: 'EXECUTION_DESK_BUY_ORDER',
-    tokenId: tokenId.substring(0, 20) + '...',
+    tokenId: maskId(tokenId),
     amountUSDC: amountUSDC.toFixed(2),
     price: price.toFixed(4),
     timestamp: new Date().toISOString()
@@ -239,12 +715,29 @@ function placeBuyOrder(tokenId, amountUSDC, price, options = {}) {
       const orderResult = result.parsed.orderResult;
 
       if (orderResult.success) {
+        // FIX: Calculate actual cost with proper fallback (prevents cost basis mismatch)
+        let actualCost = amountUSDC;  // Default to intended
+        if (orderResult.makingAmount) {
+          actualCost = parseFloat(orderResult.makingAmount);
+        } else if (orderResult.totalCost) {
+          actualCost = parseFloat(orderResult.totalCost);
+        } else {
+          // Log when using fallback - this indicates potential slippage hiding
+          console.log(JSON.stringify({
+            action: 'COST_BASIS_FALLBACK',
+            intended: amountUSDC.toFixed(4),
+            usingFallback: true,
+            reason: 'API returned null makingAmount',
+            timestamp: new Date().toISOString()
+          }));
+        }
+
         const fillResult = {
           success: orderResult.status === 'matched', // Only success if actually filled!
           orderID: orderResult.orderID,
           status: orderResult.status,
           sharesReceived: parseFloat(orderResult.takingAmount) || 0,
-          costUSDC: parseFloat(orderResult.makingAmount) || amountUSDC,
+          costUSDC: Math.max(actualCost, amountUSDC),  // Never undercount cost
           avgFillPrice: 0,
           txHash: orderResult.transactionsHashes?.[0] || null,
           attempt: attempt
@@ -253,6 +746,18 @@ function placeBuyOrder(tokenId, amountUSDC, price, options = {}) {
         // Calculate average fill price
         if (fillResult.sharesReceived > 0) {
           fillResult.avgFillPrice = fillResult.costUSDC / fillResult.sharesReceived;
+        }
+
+        // Log slippage for analysis (comparing actual vs intended cost)
+        if (fillResult.costUSDC > amountUSDC) {
+          console.log(JSON.stringify({
+            action: 'SLIPPAGE_DETECTED',
+            intended: amountUSDC.toFixed(4),
+            actual: fillResult.costUSDC.toFixed(4),
+            premium: (fillResult.costUSDC - amountUSDC).toFixed(4),
+            premiumPct: (((fillResult.costUSDC / amountUSDC) - 1) * 100).toFixed(2) + '%',
+            timestamp: new Date().toISOString()
+          }));
         }
 
         // Only count as success if order was actually matched/filled
@@ -267,6 +772,28 @@ function placeBuyOrder(tokenId, amountUSDC, price, options = {}) {
             attempt: attempt,
             timestamp: new Date().toISOString()
           }));
+
+          // POST-TRADE VERIFICATION: Verify against Polymarket API
+          // This ensures virtual accounts match actual fill data
+          if (VERIFICATION_CONFIG.enabled && fillResult.orderID) {
+            const verifyResult = verifyTradeSync(fillResult.orderID, {
+              shares: fillResult.sharesReceived,
+              cost: fillResult.costUSDC,
+              avgPrice: fillResult.avgFillPrice
+            });
+
+            if (verifyResult.verified) {
+              // Use verified values (corrects any discrepancy automatically)
+              fillResult.sharesReceived = verifyResult.shares;
+              fillResult.costUSDC = verifyResult.cost;
+              fillResult.avgFillPrice = verifyResult.avgPrice;
+              fillResult.verified = true;
+            } else {
+              fillResult.verified = false;
+              fillResult.verificationError = verifyResult.error;
+            }
+          }
+
           return fillResult;
         } else {
           // Order went "live" but didn't fill - treat as failure and retry
@@ -330,9 +857,43 @@ function placeBuyOrder(tokenId, amountUSDC, price, options = {}) {
 function placeSellOrder(tokenId, shares, price, options = {}) {
   const { maxRetries = 2, retryDelayMs = 2000 } = options;
 
+  // ═══════════════════════════════════════════════════════════════════
+  // SHADOW MODE: Intercept and simulate sell execution
+  // ═══════════════════════════════════════════════════════════════════
+  if (SHADOW_MODE && options.positionId) {
+    console.log(JSON.stringify({
+      action: 'SHADOW_MODE_INTERCEPT',
+      type: 'SELL',
+      positionId: options.positionId,
+      shares: shares,
+      price: price.toFixed(4),
+      timestamp: new Date().toISOString()
+    }));
+
+    const shadowResult = simulationBridge.mockSellExecution(options.positionId, price);
+
+    if (shadowResult.success) {
+      return {
+        success: true,
+        status: shadowResult.status,
+        sharesSold: shares,
+        proceedsUSDC: shadowResult.proceeds,
+        avgFillPrice: price,
+        pnl: shadowResult.pnl,
+        _shadow: true
+      };
+    } else {
+      return {
+        success: false,
+        error: shadowResult.error,
+        _shadow: true
+      };
+    }
+  }
+
   console.log(JSON.stringify({
     action: 'EXECUTION_DESK_SELL_ORDER',
-    tokenId: tokenId.substring(0, 20) + '...',
+    tokenId: maskId(tokenId),
     shares: shares,
     price: price.toFixed(4),
     timestamp: new Date().toISOString()
@@ -498,8 +1059,25 @@ function executeApprovedTrade(trade, market) {
     timestamp: new Date().toISOString()
   }));
 
-  // Get current orderbook to verify price
-  const orderbook = getOrderbook(trade.tokenId);
+  // FIX #1: Ensure we query the correct orderbook for the side we're trading
+  // Each outcome (YES/NO) has its own token with its own orderbook
+  const correctTokenId = trade.side === 'YES'
+    ? (market.yesTokenId || trade.tokenId)
+    : (market.noTokenId || trade.tokenId);
+
+  // Validate token ID matches expected
+  if (correctTokenId !== trade.tokenId && market.yesTokenId && market.noTokenId) {
+    console.warn(JSON.stringify({
+      action: 'TOKEN_ID_MISMATCH',
+      providedTokenId: trade.tokenId?.substring(0, 20) + '...',
+      expectedTokenId: correctTokenId?.substring(0, 20) + '...',
+      side: trade.side,
+      usingCorrect: true,
+      timestamp: new Date().toISOString()
+    }));
+  }
+
+  const orderbook = getOrderbook(correctTokenId);
 
   if (!orderbook.success) {
     return {
@@ -509,8 +1087,8 @@ function executeApprovedTrade(trade, market) {
     };
   }
 
-  // Check if price is still acceptable
-  const currentPrice = trade.side === 'YES' ? orderbook.bestAsk : orderbook.bestAsk;
+  // bestAsk is correct for buying (we pay the ask price to acquire tokens)
+  const currentPrice = orderbook.bestAsk;
 
   if (currentPrice > trade.maxPrice) {
     console.log(JSON.stringify({
@@ -530,8 +1108,15 @@ function executeApprovedTrade(trade, market) {
     };
   }
 
-  // Execute the buy order
-  const result = placeBuyOrder(trade.tokenId, trade.amount, trade.maxPrice);
+  // Execute the buy order - USE correctTokenId (not trade.tokenId!)
+  // Pass shadow mode options for simulation bridge
+  const result = placeBuyOrder(correctTokenId, trade.amount, trade.maxPrice, {
+    side: trade.side,
+    windowSlug: trade.windowSlug || market.slug,
+    btcOpenPrice: trade.btcOpenPrice || market.btcPrice || 0,
+    desk: trade.desk,
+    availableCapital: trade.availableCapital
+  });
 
   if (result.success) {
     return {
@@ -557,8 +1142,14 @@ function executeApprovedTrade(trade, market) {
       const keyRefresh = refreshAPIKeys();
 
       if (keyRefresh.success) {
-        // Retry the order with new keys
-        const retryResult = placeBuyOrder(trade.tokenId, trade.amount, trade.maxPrice);
+        // Retry the order with new keys - USE correctTokenId (not trade.tokenId!)
+        const retryResult = placeBuyOrder(correctTokenId, trade.amount, trade.maxPrice, {
+          side: trade.side,
+          windowSlug: trade.windowSlug || market.slug,
+          btcOpenPrice: trade.btcOpenPrice || market.btcPrice || 0,
+          desk: trade.desk,
+          availableCapital: trade.availableCapital
+        });
 
         if (retryResult.success) {
           return {
@@ -604,7 +1195,7 @@ const activeFlipOrders = new Map(); // orderId -> { tokenId, entryPrice, shares,
 function placeDipBuyWithAutoFlip(tokenId, buyPrice, targetSellPrice, amountUSDC) {
   console.log(JSON.stringify({
     action: 'EXECUTION_DESK_DIP_BUY_INIT',
-    tokenId: tokenId.substring(0, 20) + '...',
+    tokenId: maskId(tokenId),
     buyPrice: buyPrice.toFixed(3),
     targetSellPrice: targetSellPrice.toFixed(3),
     amountUSDC: amountUSDC.toFixed(2),
@@ -853,7 +1444,18 @@ module.exports = {
   getActiveFlipOrders,
   hasActiveDipBuy,
   emergencyCancelAllBuys,
-  emergencyPanicSell
+  emergencyPanicSell,
+  // Post-trade verification (Gemini recommended)
+  verifyTrade,
+  verifyTradeSync,
+  VERIFICATION_CONFIG,
+  // Shadow mode (simulation bridge)
+  isShadowMode: () => SHADOW_MODE,
+  getShadowStatus: () => SHADOW_MODE ? simulationBridge.getStatus() : null,
+  settleShadowWindow: (slug, btcPrice) => SHADOW_MODE ? simulationBridge.emulateSettlement(slug, btcPrice) : null,
+  setWindowContext,
+  getWindowContext,
+  SHADOW_MODE
 };
 
 // Self-test if run directly
