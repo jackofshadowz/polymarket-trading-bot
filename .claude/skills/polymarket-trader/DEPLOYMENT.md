@@ -6,10 +6,20 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     ASYMMETRIC EDGE BOT v2.0                        │
-│                   "Set and Forget" Trading System                   │
+│                     ASYMMETRIC EDGE BOT v2.1                        │
+│              "Set and Forget" with Profit Protection                │
 ├─────────────────────────────────────────────────────────────────────┤
 │                                                                     │
+│  ┌─────────────────────────────────────────────────────────────┐   │
+│  │                    WEALTH FORTRESS                           │   │
+│  │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │   │
+│  │  │    VAULT     │    │  WAR CHEST   │    │   RATCHET    │   │   │
+│  │  │   (Locked)   │    │ (Tradeable)  │    │    (HWM)     │   │   │
+│  │  │  Protected   │    │  Dynamic %   │    │ Auto-Lock    │   │   │
+│  │  └──────────────┘    └──────────────┘    └──────────────┘   │   │
+│  └─────────────────────────────────────────────────────────────┘   │
+│         │                       │                                   │
+│         ▼                       ▼                                   │
 │  ┌─────────────┐   ┌─────────────┐   ┌─────────────┐               │
 │  │   ORACLE    │   │   CLIPPER   │   │  EXECUTION  │               │
 │  │    DESK     │──▶│    DESK     │──▶│    DESK     │               │
@@ -35,6 +45,7 @@
 ```
 scripts/
 ├── asymmetric-edge-bot.js      # Main entry point & orchestrator
+├── wealth-fortress.js          # NEW: Profit protection & capital preservation
 ├── oracle-desk.js              # Real-time Binance WebSocket stream
 ├── binance-oracle.js           # REST API fallback + market discovery
 ├── clipper-desk-manager.js     # All 5 trading strategies
@@ -47,6 +58,105 @@ scripts/
 ├── dialogue-recorder.js        # Trade decision logging
 ├── leaderboard-tracker.js      # Performance tracking
 └── .env                        # API keys (not committed)
+```
+
+---
+
+## Wealth Fortress (Capital Preservation System)
+
+### The Problem: "Giving Back the Gains"
+
+If your balance grows from $36 to $180, then back to $36:
+- Without protection: Lost 100% of profits
+- With Wealth Fortress: Keep 50-75% of profits in vault
+
+### The Solution: 3-Layer Protection
+
+#### 1. THE VAULT (Locked Savings)
+Profits that trading desks **cannot touch**. Once money enters the vault:
+- It's invisible to trading logic
+- Protected from bad trades
+- Only accessible via manual override
+
+#### 2. THE WAR CHEST (Dynamic Trading Capital)
+The amount available for trading, calculated based on balance tier:
+
+| Phase | Balance Range | Trading % | Example |
+|-------|---------------|-----------|---------|
+| **BUILDER** | $0-$500 | 80% | $80 of $100 |
+| **GROWTH** | $500-$5,000 | 50% | $500 of $1,000 |
+| **WEALTH** | $5,000+ | $2,500 + 20% surplus | $3,500 of $10,000 |
+
+#### 3. THE RATCHET (High Water Mark Profit Lock)
+Every time balance hits new all-time high:
+- Lock 50% of new profits into vault
+- Update high water mark
+- Never give back the gains
+
+### Principal Shield
+
+Once you double your initial investment ($36 → $72):
+- Original $36 is **locked forever**
+- You're now playing with "house money"
+- Cannot lose your starting capital
+
+### Integration
+
+```javascript
+// Every trading loop:
+wealthFortress.sync(realBalance);
+
+// Trading desks only see:
+const tradeableBalance = wealthFortress.getTradeableBalance();
+// NOT the total equity!
+```
+
+### Example Scenario
+
+**Start:** $36 balance
+
+1. **Win streak → $180**
+   - New profit: $144
+   - Lock 50%: $72 → Vault
+   - War Chest: $108 × 80% = $86.40
+   - Trading sees: $86.40 (not $180!)
+
+2. **Lose streak (5 losses)**
+   - War Chest drops: $86.40 → $20
+   - Vault untouched: $72
+
+3. **End state:**
+   - Total equity: $92 ($72 vault + $20 active)
+   - **Saved:** $56 of original $144 profit
+
+Without Wealth Fortress: Would have lost all $144 profit.
+
+### Configuration
+
+Edit `wealth-fortress.js`:
+
+```javascript
+// Protection ratios
+this.PROFIT_SKIM_RATIO = 0.50;    // Lock 50% of profits at HWM
+
+// Tier boundaries
+BUILDER: { maxBalance: 500, warChestRatio: 0.80 }
+GROWTH:  { maxBalance: 5000, warChestRatio: 0.50 }
+WEALTH:  { baseWarChest: 2500, surplusRatio: 0.20 }
+```
+
+### Log Output
+
+```json
+{
+  "action": "WEALTH_FORTRESS_SYNC",
+  "phase": "🏗️ BUILDER",
+  "totalEquity": "$180.00",
+  "vault": "$72.00 (40% protected)",
+  "warChest": "$86.40 (48% at risk)",
+  "principal": "✅ SECURED",
+  "highWaterMark": "$180.00"
+}
 ```
 
 ## The 5 Trading Strategies

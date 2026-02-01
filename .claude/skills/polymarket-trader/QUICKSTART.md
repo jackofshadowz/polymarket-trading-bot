@@ -110,6 +110,48 @@ DIP_BUY_PRICE = 0.47;      // Buy dips at 47 cents
 | Lotto Budget | $1/ticket | Small bet, huge upside |
 | Treasury Interval | 5 min | Auto-redeem winnings |
 
+## Wealth Fortress (Profit Protection)
+
+**NEW IN v2.1:** Prevents "giving back the gains" with automatic profit locking.
+
+### The 3-Layer System
+
+| Layer | Purpose | How It Works |
+|-------|---------|--------------|
+| **VAULT** | Locked savings | Profits protected from trading |
+| **WAR CHEST** | Trading capital | Dynamic % based on balance tier |
+| **RATCHET** | Auto-lock profits | 50% of new highs go to vault |
+
+### Balance Tiers
+
+| Phase | Balance | Trading % | Example |
+|-------|---------|-----------|---------|
+| BUILDER | $0-$500 | 80% | $80 tradeable of $100 |
+| GROWTH | $500-$5k | 50% | $500 tradeable of $1k |
+| WEALTH | $5k+ | $2.5k + 20% | $3.5k tradeable of $10k |
+
+### Principal Shield
+
+Once you **double your money** ($36 → $72+):
+- Original $36 is **locked forever**
+- You're now trading with "house money"
+- Cannot lose your starting capital
+
+### Example Protection
+
+**Scenario:** $36 → $180 (wins) → losses
+
+| Without Fortress | With Fortress |
+|------------------|---------------|
+| Back to $36 | Keep $92 |
+| Lost 100% profit | Saved 39% |
+
+### Monitor Status
+
+```bash
+grep WEALTH_FORTRESS bot.log | tail -5
+```
+
 ## Autonomous Features
 
 The bot runs fully autonomous:

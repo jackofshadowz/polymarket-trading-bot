@@ -28,6 +28,7 @@ const clipperDeskManager = require('./clipper-desk-manager');
 const executionDesk = require('./execution-desk');
 const binanceOracle = require('./binance-oracle');
 const treasuryDesk = require('./treasury-desk');
+const wealthFortress = require('./wealth-fortress');
 
 // ============================================================
 // STRATEGY CONFIG
@@ -82,7 +83,8 @@ let MEMORY = {
   currentWindow: null,
   windowState: {},             // Track state per window
   priceHistory: [],
-  activeBalance: 0,
+  activeBalance: 0,            // War Chest (tradeable balance from Wealth Fortress)
+  realBalance: 0,              // Total equity (real balance including vault)
 };
 
 let CURRENT_PRICE = null;
@@ -181,6 +183,11 @@ async function redeemWinningPositions(windowSlug, winner) {
  *
  * ⚠️  MANUAL BALANCE - UPDATE THIS AS YOUR BALANCE GROWS!
  * pmarket-cli doesn't have a balance command, so we track manually
+ *
+ * WEALTH FORTRESS INTEGRATION:
+ * - Syncs real balance with Wealth Fortress
+ * - Returns WAR CHEST (tradeable) balance, not total equity
+ * - Vault balance is hidden from trading desks
  */
 function fetchBalance() {
   try {
@@ -188,57 +195,40 @@ function fetchBalance() {
     // Current as of: 2026-01-30 17:10
     const MANUAL_BALANCE = 36.36; // Your actual Polymarket cash balance
 
-    MEMORY.activeBalance = MANUAL_BALANCE;
+    // ============================================================
+    // WEALTH FORTRESS SYNC
+    // This is the critical step that protects profits!
+    // ============================================================
+    wealthFortress.sync(MANUAL_BALANCE);
+
+    // Get the TRADEABLE balance (War Chest), not total equity
+    const tradeableBalance = wealthFortress.getTradeableBalance();
+    const fortressReport = wealthFortress.getReport();
+
+    // Store both for reference
+    MEMORY.realBalance = MANUAL_BALANCE;
+    MEMORY.activeBalance = tradeableBalance;
 
     console.log(JSON.stringify({
-      action: 'BALANCE_SET',
-      balance: MANUAL_BALANCE.toFixed(2),
-      source: 'MANUAL (update in code as balance grows)',
+      action: 'WEALTH_FORTRESS_SYNC',
+      phase: fortressReport.phaseEmoji + ' ' + fortressReport.phase,
+      totalEquity: '$' + fortressReport.totalEquity,
+      vault: '$' + fortressReport.vault + ' (' + fortressReport.protectedPercentage + ' protected)',
+      warChest: '$' + fortressReport.warChest + ' (' + fortressReport.riskPercentage + ' at risk)',
+      principal: fortressReport.principalStatus,
+      highWaterMark: '$' + fortressReport.highWaterMark,
+      source: 'WEALTH_FORTRESS',
       timestamp: new Date().toISOString()
     }));
 
-    return MANUAL_BALANCE;
+    return tradeableBalance;
 
-    // DISABLED: pmarket-cli -w doesn't exist
-    // const { execSync } = require('child_process');
-    // const output = execSync('pmarket-cli -w', {...});
-
-    /*
-    // Parse balance from output
-    // Expected format: something with "balance" or "USDC"
-    const balanceMatch = output.match(/balance.*?(\d+\.?\d*)/i) || output.match(/(\d+\.?\d*)\s*USDC/i);
-
-    if (balanceMatch) {
-      const balance = parseFloat(balanceMatch[1]);
-      MEMORY.activeBalance = balance;
-
-      console.log(JSON.stringify({
-        action: 'BALANCE_FETCHED',
-        balance: balance.toFixed(2),
-        timestamp: new Date().toISOString()
-      }));
-
-      return balance;
-    }
-    */
-
-    // Fallback: If no balance found, keep existing or use conservative estimate
-    if (MEMORY.activeBalance === 0) {
-      MEMORY.activeBalance = 40.00; // REAL balance, not $100 fake!
-      console.warn(JSON.stringify({
-        action: 'BALANCE_FETCH_FAILED',
-        fallback: 'Using $100 default',
-        timestamp: new Date().toISOString()
-      }));
-    }
-
-    return MEMORY.activeBalance;
   } catch (error) {
-    console.warn('Balance fetch failed:', error.message);
+    console.warn('Wealth Fortress sync failed:', error.message);
 
-    // Use REAL default if never set (not fake $100!)
+    // Fallback to basic balance
     if (MEMORY.activeBalance === 0) {
-      MEMORY.activeBalance = 40.00; // YOUR REAL BALANCE
+      MEMORY.activeBalance = 36.00;
     }
 
     return MEMORY.activeBalance;
@@ -842,6 +832,25 @@ async function tradingLoop() {
 
               // Check if rebalancing is needed
               virtualAccounts.checkRebalancing();
+
+              // ============================================================
+              // SYNC WEALTH FORTRESS AFTER SETTLEMENTS
+              // This is critical - it locks profits at new high water marks!
+              // ============================================================
+              const updatedBalance = virtualAccounts.getAccounts()?.fund?.totalBalance;
+              if (updatedBalance) {
+                wealthFortress.sync(updatedBalance);
+                const report = wealthFortress.getReport();
+                console.log(JSON.stringify({
+                  action: 'WEALTH_FORTRESS_POST_SETTLEMENT',
+                  totalEquity: '$' + report.totalEquity,
+                  vault: '$' + report.vault,
+                  warChest: '$' + report.warChest,
+                  phase: report.phase,
+                  hwm: '$' + report.highWaterMark,
+                  timestamp: new Date().toISOString()
+                }));
+              }
             }
 
             // AUTO-REDEEM winning positions to free up capital
@@ -1768,7 +1777,10 @@ async function tradingLoop() {
       // Get predicted winner based on delta
       const predicted = windowPriceTracker.getPredictedWinner(window.slug);
 
-      // Log status
+      // Get Wealth Fortress status for dashboard
+      const fortressReport = wealthFortress.getReport();
+
+      // Log status with Wealth Fortress
       console.log(JSON.stringify({
         action: 'STATUS',
         window: window.slug,
@@ -1788,7 +1800,15 @@ async function tradingLoop() {
         chosenSide: windowState.chosenSide || 'NONE',
         orders: `${windowState.ordersPlaced}/${CONFIG.maxOrdersPerWindow}`,
         spent: `$${windowState.totalSpent.toFixed(2)}`,
-        balance: `$${MEMORY.activeBalance.toFixed(2)}`,
+        // WEALTH FORTRESS STATUS
+        fortress: {
+          phase: fortressReport.phaseEmoji + ' ' + fortressReport.phase,
+          total: '$' + fortressReport.totalEquity,
+          vault: '$' + fortressReport.vault,
+          warChest: '$' + fortressReport.warChest,
+          principal: fortressReport.principalStatus,
+          hwm: '$' + fortressReport.highWaterMark
+        },
         timestamp: new Date().toISOString(),
       }));
 
@@ -1996,12 +2016,33 @@ async function start() {
   windowHistoryTracker.loadHistory();
 
   // Fetch current balance from Polymarket
+  // This syncs with Wealth Fortress and returns tradeable balance
   fetchBalance();
 
+  // ============================================================
+  // WEALTH FORTRESS INITIALIZATION
+  // This is your profit protection layer - it sits ABOVE the desks
+  // ============================================================
+  const fortressStats = wealthFortress.getStats();
+  console.log(JSON.stringify({
+    action: 'WEALTH_FORTRESS_INITIALIZED',
+    phase: wealthFortress.getCurrentPhase(),
+    totalEquity: '$' + fortressStats.totalEquity.toFixed(2),
+    vault: '$' + fortressStats.vaultBalance.toFixed(2) + ' (PROTECTED)',
+    warChest: '$' + fortressStats.warChest.toFixed(2) + ' (TRADEABLE)',
+    principalSecured: fortressStats.principalSecured ? '✅ SAFE FOREVER' : '⚠️ Not yet (need 2x)',
+    highWaterMark: '$' + fortressStats.highWaterMark.toFixed(2),
+    lifetimeLocked: '$' + fortressStats.lifetimeLocked.toFixed(2),
+    timestamp: new Date().toISOString()
+  }));
+
   // Initialize 7-player trading desk system
+  // IMPORTANT: Desks now receive WAR CHEST balance, not total equity!
   console.log(JSON.stringify({
     action: '7_PLAYER_SYSTEM_INITIALIZING',
     fundName: 'ASYMMETRIC ALPHA FUND',
+    capitalSource: 'WAR_CHEST (not total equity)',
+    warChest: '$' + MEMORY.activeBalance.toFixed(2),
     timestamp: new Date().toISOString()
   }));
 
